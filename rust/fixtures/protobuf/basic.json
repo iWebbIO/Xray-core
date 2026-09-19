@@ -1,0 +1,17 @@
+{
+  "log": { "access": "none", "error": "none", "loglevel": "warning" },
+  "stats": {},
+  "policy": {
+    "levels": { "0": { "handshake": 0, "connIdle": 120, "bufferSize": 64 } },
+    "system": { "statsOutboundUplink": true, "statsOutboundDownlink": true }
+  },
+  "api": { "tag": "api", "listen": "127.0.0.1:10085", "services": ["StatsService", "LoggerService"] },
+  "inbounds": [
+    { "tag": "local", "listen": "127.0.0.1", "port": 10800, "protocol": "socks", "settings": { "auth": "noauth", "udp": false } }
+  ],
+  "outbounds": [
+    { "tag": "direct", "protocol": "freedom" },
+    { "tag": "blocked", "protocol": "blackhole", "settings": { "response": { "type": "custom", "customResponseData": "/wABgA==" } } }
+  ],
+  "routing": { "domainStrategy": "AsIs", "rules": [ { "type": "field", "domain": ["full:example.test"], "port": "80,443", "outboundTag": "direct" } ] }
+}
