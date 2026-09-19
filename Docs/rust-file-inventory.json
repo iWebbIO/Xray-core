@@ -1,0 +1,1232 @@
+{
+  "capturedAt": "2026-09-19T21:41:45.617112+01:00",
+  "status": "paused",
+  "workspace": "C:\\Users\\W\\Documents\\iwebbio\\Xray-core",
+  "branch": "main",
+  "head": "dcdfc57ccdad496e192344788a7d14a8d4c88573",
+  "sourceTarget": "26.9.9",
+  "sourceFileCount": 236,
+  "rustSourceFileCount": 159,
+  "sourceBytes": 3347021.0,
+  "selection": "rg --files rust plus migration Cargo/root/workflow files; ignored build/cache/protected artifacts excluded",
+  "gitStatus": [
+    " M .github/dependabot.yml",
+    " M .gitignore",
+    " M README.md",
+    "?? .github/workflows/rust-release.yml",
+    "?? .github/workflows/rust.yml",
+    "?? Cargo.lock",
+    "?? Cargo.toml",
+    "?? Docs/",
+    "?? rust/"
+  ],
+  "files": [
+    {
+      "path": ".github/dependabot.yml",
+      "bytes": 662,
+      "sha256": "85b49a54ba4b6690ae75d9bc19c4881e80caff7d5eb4c4734bfbf89183595414"
+    },
+    {
+      "path": ".github/workflows/rust-release.yml",
+      "bytes": 4208,
+      "sha256": "749086412a31e42e0ad774f7dc86144e187d64476ec755681526bd49bd940f9b"
+    },
+    {
+      "path": ".github/workflows/rust.yml",
+      "bytes": 537,
+      "sha256": "af328a10d4c0d56780a5f68fbdec8b9d893ee923272ff2e8f2425616912c31a6"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 1104,
+      "sha256": "b47690a2fbdbccccdf0fc6420347c38abd587ff40313dffadc68f0616d6db69b"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 103892,
+      "sha256": "a6bf266b348c37ea9476652c73009738e1d97417098479097bd7f85aa86ba700"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 2105,
+      "sha256": "1991e85bbb613018ca2008f4ef9d0f3b137c8e2d79c8cd36c6c3da9c7bbf5e7b"
+    },
+    {
+      "path": "README.md",
+      "bytes": 13079,
+      "sha256": "2c17e2043dc7dd72c19dd81087a9f66ac10a81ef5fb79297d5b0f9e650500dd3"
+    },
+    {
+      "path": "rust/AGENT_WORK.md",
+      "bytes": 5125,
+      "sha256": "9599a54a4a6de4ef1715110684f8f1bdeef0bd3f3ef326f089c5b6698478f59a"
+    },
+    {
+      "path": "rust/examples/http-direct.json",
+      "bytes": 178,
+      "sha256": "6930eff118ef1239c9d8210c3dd9f8291b804523e372901e60df4da92a7e16ac"
+    },
+    {
+      "path": "rust/examples/socks-direct.json",
+      "bytes": 251,
+      "sha256": "b2d562a37da87d6d3ae673b502202c584fa53cd65c3b9c6b3afac0f9a42ce516"
+    },
+    {
+      "path": "rust/fixtures/protobuf/basic.json",
+      "bytes": 874,
+      "sha256": "003f62da088677ec8faf2af5f6e62178f8adfea6ac815e0e26e15abaad2d000d"
+    },
+    {
+      "path": "rust/fixtures/protobuf/basic.pb",
+      "bytes": 667,
+      "sha256": "6a4c7a0a909af315df9253a5ffbf78af66869d53a3f0a85c6fcb07f8ca611dab"
+    },
+    {
+      "path": "rust/MIGRATION.md",
+      "bytes": 2717,
+      "sha256": "daac76cb3fe773509a9202cba60ace2918617449c8347b69af8ca3aa6da22469"
+    },
+    {
+      "path": "rust/notes/API_LOGGER.md",
+      "bytes": 3104,
+      "sha256": "7c445af671334c900411dfd4e20c6f70c92d9eb16a900cee5cfd5ea6be82ba2d"
+    },
+    {
+      "path": "rust/notes/BALANCER.md",
+      "bytes": 11929,
+      "sha256": "c1f73129fc80743a58c9ec7b4a2c00d38e09a21f72386b746763a5a148c368bb"
+    },
+    {
+      "path": "rust/notes/CLI_API.md",
+      "bytes": 4893,
+      "sha256": "8de6aec528feab1f70ecd9af038f67c5e79c36f46bf7078f9ee20e5e34e11dfb"
+    },
+    {
+      "path": "rust/notes/CLI.md",
+      "bytes": 4024,
+      "sha256": "6fb3279b791c4d3c75219b46f4c2794a7565e8bad40256bea74793299275d7f5"
+    },
+    {
+      "path": "rust/notes/DNS_ENCRYPTED.md",
+      "bytes": 9015,
+      "sha256": "d045502d5e70aa4267e9982ea916466121dfea755bd358ab0ed72f507d450eb3"
+    },
+    {
+      "path": "rust/notes/DNS.md",
+      "bytes": 8255,
+      "sha256": "22d05aeebbe2e4a46c50a191d222e1df6454cf8232b462b6f9a6a753935bd367"
+    },
+    {
+      "path": "rust/notes/FINALMASK.md",
+      "bytes": 7369,
+      "sha256": "2e8a0de1df93bfc7f395e1517af136d3aec3b27c6834cd7c5acbe2cee6d82338"
+    },
+    {
+      "path": "rust/notes/GRPC.md",
+      "bytes": 9119,
+      "sha256": "0fae6fa356b0970120d3ffcfee157558960db77a173af3b1fb5fb771092c54c7"
+    },
+    {
+      "path": "rust/notes/HTTPUPGRADE.md",
+      "bytes": 7329,
+      "sha256": "8df161cfb0d3e97531178218f579e3bbe6ebe1371854f8dc9310cd27ee8a36cd"
+    },
+    {
+      "path": "rust/notes/HYSTERIA.md",
+      "bytes": 7192,
+      "sha256": "708091404ac728b50478a4c4b93c8b0565acfd04d64762d2060d4469f0df97ac"
+    },
+    {
+      "path": "rust/notes/KCP.md",
+      "bytes": 9683,
+      "sha256": "0e93c3aa3c13ea37ff0b7e89799b659834e245c17b0e8457148c5c6f670e3688"
+    },
+    {
+      "path": "rust/notes/LOGGING.md",
+      "bytes": 5705,
+      "sha256": "c7f051aadde8f8ddd020cb2583f3ed1f2d902b4d2f4942ed43da45f590109eba"
+    },
+    {
+      "path": "rust/notes/PACKAGING.md",
+      "bytes": 8862,
+      "sha256": "a583026112f3eab7bf1be1eca3e5e3e460ff51de888c09c05a294c9ebba6b94b"
+    },
+    {
+      "path": "rust/notes/PARITY_AUDIT.md",
+      "bytes": 34866,
+      "sha256": "c306b142fc68b0f0ba3f362f9f2f76b3f9bee8c7b67b10012ab476737ec798de"
+    },
+    {
+      "path": "rust/notes/PROTOBUF_CONFIG.md",
+      "bytes": 5909,
+      "sha256": "afcc1273b5406740c4a1624f6907ade7b56a32a1d691b8f9db3a4e5f2d5c7b36"
+    },
+    {
+      "path": "rust/notes/PROXY_PROTOCOL.md",
+      "bytes": 7155,
+      "sha256": "67e99041ef804d3c10223d71f12bee27ef4480e8c172248b37861567e6adad66"
+    },
+    {
+      "path": "rust/notes/REALITY_HANDSHAKE.md",
+      "bytes": 10513,
+      "sha256": "1555bcc4a676f440b04be47844e47544cd4203d50f367949faaa632e44554d3d"
+    },
+    {
+      "path": "rust/notes/REALITY_SERVER.md",
+      "bytes": 8291,
+      "sha256": "9837d05beda8bcf3dd30d12c2f444f3f4d561924bd543d48776e2a1229ccb784"
+    },
+    {
+      "path": "rust/notes/REALITY.md",
+      "bytes": 11046,
+      "sha256": "2ba3d2f4aebafc5ff0030ee2a203b8b4ddbc41a1c525132b5b80dfbf8744b4d4"
+    },
+    {
+      "path": "rust/notes/SHADOWSOCKS_UDP.md",
+      "bytes": 8533,
+      "sha256": "1c637e421e831d6c41763b108be898bcfca379da7c078bb1ef85b499c4f0419c"
+    },
+    {
+      "path": "rust/notes/SHADOWSOCKS2022.md",
+      "bytes": 5841,
+      "sha256": "b9b06e1bc4424695910dc6aac1064654bd8d4ac1f16466ba3ef4eeca264d50cb"
+    },
+    {
+      "path": "rust/notes/TLS.md",
+      "bytes": 4011,
+      "sha256": "9aa8522c7c6a12eff838867b0e0626912a1acc48b26e20cfab856147540a4893"
+    },
+    {
+      "path": "rust/notes/TUN.md",
+      "bytes": 9258,
+      "sha256": "ace2c88eb5f330bf12f45adc079efb0459f98c5b043c20a4392cbff58860671e"
+    },
+    {
+      "path": "rust/notes/UDP.md",
+      "bytes": 5479,
+      "sha256": "66a5720a4f40fd1b070a43b3cedfd2724ad5865752db3d49bc8ce8f5ebabbe6b"
+    },
+    {
+      "path": "rust/notes/VLESS_HANDSHAKE.md",
+      "bytes": 7855,
+      "sha256": "706ee8b7f3d6c0d01d4ca9c6671b4307e73eb899f7537e83fad2e9f32c13872f"
+    },
+    {
+      "path": "rust/notes/VLESS_SECURITY.md",
+      "bytes": 7294,
+      "sha256": "09302190d7490258b8abfbda2a90553890b5d3ac1485e76dbb6deed95d6e4d79"
+    },
+    {
+      "path": "rust/notes/WEBSOCKET.md",
+      "bytes": 7778,
+      "sha256": "077645e87fffe1aa4576d6d0b170c25079229513350fa8b612fa9faaaacd5781"
+    },
+    {
+      "path": "rust/notes/WIREGUARD.md",
+      "bytes": 10329,
+      "sha256": "88fae72bae5c49f179bcf94f61c47b56226de316bd214446acfbcf5297d1b5eb"
+    },
+    {
+      "path": "rust/notes/XDRIVE.md",
+      "bytes": 10002,
+      "sha256": "01b7d5bb8876d7cec46727fe75df199ded2ec724a045e13b59c7d6b3ff668c50"
+    },
+    {
+      "path": "rust/notes/XHTTP.md",
+      "bytes": 7201,
+      "sha256": "f36a2f6bfabf59809ae9005cd6329fa98d601ddb46490015c5d5041fc4a805d1"
+    },
+    {
+      "path": "rust/packaging/Dockerfile",
+      "bytes": 1384,
+      "sha256": "f279d7c14e00525074fc4c2bb15c0a3218c5380c33e8e116c0016c7b83352c09"
+    },
+    {
+      "path": "rust/packaging/Dockerfile.dockerignore",
+      "bytes": 190,
+      "sha256": "a48819cef353eeac34c15612f3458235f73fec726e048e8ef398c48617e70a01"
+    },
+    {
+      "path": "rust/packaging/package.py",
+      "bytes": 10330,
+      "sha256": "fa806fc04a9afe04fe4fc69ae972e0126a53399f366268317c1107ab9605cb49"
+    },
+    {
+      "path": "rust/packaging/targets.json",
+      "bytes": 5343,
+      "sha256": "f7a39dc74111d82be5c4f963b67be1ace171a0f8efa7261b99d86ca22ba1945c"
+    },
+    {
+      "path": "rust/packaging/test_package.py",
+      "bytes": 6795,
+      "sha256": "d46a6a0e47b805a0ffc30c320b4412d65e0826187c9e6fb0d74ae0998d476f9f"
+    },
+    {
+      "path": "rust/README.md",
+      "bytes": 2858,
+      "sha256": "66076e6f4431d0d176f0e3a4291ce7ab376c3e840af3d482b59215f3a54a7698"
+    },
+    {
+      "path": "rust/xray-core/Cargo.toml",
+      "bytes": 1859,
+      "sha256": "63745bf9a1a88c1a94fd8670d9ad916b4d3255cbeb7c1c77da007b8323d9932a"
+    },
+    {
+      "path": "rust/xray-core/src/address.rs",
+      "bytes": 6554,
+      "sha256": "76939154b7cd6954c96ab8ee140a58e4f4b87aa03fcb4f94474806c03e155bef"
+    },
+    {
+      "path": "rust/xray-core/src/api.rs",
+      "bytes": 1096,
+      "sha256": "92c7ddc179cb7f5bca6a0cbd8adf470cc80c72918be86c97830b5c66d7c83e09"
+    },
+    {
+      "path": "rust/xray-core/src/api/logger.rs",
+      "bytes": 10389,
+      "sha256": "66698bc096e96e955de97f22c22b35bd3be075c4e708774504e4335ee4e32ab2"
+    },
+    {
+      "path": "rust/xray-core/src/api/observatory.rs",
+      "bytes": 7070,
+      "sha256": "00b85745703bd38454ae28f81b056dff78bc1785aa0df13741d8d9447f5b90b4"
+    },
+    {
+      "path": "rust/xray-core/src/api/server.rs",
+      "bytes": 8159,
+      "sha256": "57b1eba433a219473de95b5ab6d2cd18a2bce5006976bd081a69bffcf1ec37cf"
+    },
+    {
+      "path": "rust/xray-core/src/api/stats.rs",
+      "bytes": 11297,
+      "sha256": "9c8b87627d7bf8f9c176b84a28d53eda69da787f205729230c029a648b9a98b0"
+    },
+    {
+      "path": "rust/xray-core/src/api/stats/tests.rs",
+      "bytes": 19595,
+      "sha256": "ba4c8daa6fe3ca98543199e8211084bee6ecf455170af490a59438f93b05aec8"
+    },
+    {
+      "path": "rust/xray-core/src/api/system.rs",
+      "bytes": 2761,
+      "sha256": "36ee56d35a7a1485e88180eea82e5c05224e3bc52b8d63d42240051bf9af8789"
+    },
+    {
+      "path": "rust/xray-core/src/config.rs",
+      "bytes": 26814,
+      "sha256": "7966118f10256d88b647225a984fdb6ed365bbadd6bc0aaf8fa34c1f1c322e99"
+    },
+    {
+      "path": "rust/xray-core/src/config/dns.rs",
+      "bytes": 42162,
+      "sha256": "c2b22554bbf30c9986169268325710ffa6ca63767d2c289ed5a82383d0cb69c6"
+    },
+    {
+      "path": "rust/xray-core/src/config/observatory.rs",
+      "bytes": 5698,
+      "sha256": "46216276437a5568af2a3591f184bc5a138502ec684768ef8f03d69f97e3b53c"
+    },
+    {
+      "path": "rust/xray-core/src/config/protobuf.rs",
+      "bytes": 61442,
+      "sha256": "c5c08a2a0fd6d368195201429e7a2eea23b3561c4f632c0a987057fb01a49e02"
+    },
+    {
+      "path": "rust/xray-core/src/config/proxies.rs",
+      "bytes": 17324,
+      "sha256": "b9c58608f25aa307b37c033746780ce13bbc36ddde89511bd0ec98a1e3129ee9"
+    },
+    {
+      "path": "rust/xray-core/src/config/reality.rs",
+      "bytes": 3465,
+      "sha256": "1ae8837a8b7673c3fa6cd8db19dcb9bb3fb687a461d085413df8b0884d08ab95"
+    },
+    {
+      "path": "rust/xray-core/src/config/vmess.rs",
+      "bytes": 3665,
+      "sha256": "af405041d230744266cce62dc97f735f55a708fdd03043ff5230ba1257df4d1c"
+    },
+    {
+      "path": "rust/xray-core/src/dns.rs",
+      "bytes": 2729,
+      "sha256": "60ed0e5469ca497c194a2d20af6241afabd372c1f7978185f5448b9d9fee2521"
+    },
+    {
+      "path": "rust/xray-core/src/dns/cache.rs",
+      "bytes": 2808,
+      "sha256": "fae302f170932bba9c95be4e1f857951fa271806e6ab8c11602848f96bc15a0d"
+    },
+    {
+      "path": "rust/xray-core/src/dns/encrypted.rs",
+      "bytes": 44079,
+      "sha256": "eaf5ec0a9f5aa1b5af0206c2763de4ea8b371997e6a2787c4efd0332d13df40f"
+    },
+    {
+      "path": "rust/xray-core/src/dns/network.rs",
+      "bytes": 25191,
+      "sha256": "870ca21bb55666dfb46a558c9eb55f52ead5939b854f4ef63dfe8d629714cba5"
+    },
+    {
+      "path": "rust/xray-core/src/dns/network/connector.rs",
+      "bytes": 8870,
+      "sha256": "4a1c87372cab41c7ded04189b553de6fac3a3bbe279b6cd52255b65e2230a56a"
+    },
+    {
+      "path": "rust/xray-core/src/dns/network/tests.rs",
+      "bytes": 29051,
+      "sha256": "4a4b6b8a5f97051ea9e6a0f1d5142077c30b055819596900e8580d6a6f60144e"
+    },
+    {
+      "path": "rust/xray-core/src/dns/network/WIRING.md",
+      "bytes": 7695,
+      "sha256": "7acb66b9cec73bea0c0062f50e69c96c446cdfc24a7da5c4ef85b0b4f0769aa0"
+    },
+    {
+      "path": "rust/xray-core/src/dns/resolver.rs",
+      "bytes": 20944,
+      "sha256": "1278686e93554a2439cf4189930ee59a4c8a3169ad675564355596392b36715e"
+    },
+    {
+      "path": "rust/xray-core/src/dns/service.rs",
+      "bytes": 8001,
+      "sha256": "f30d1fd8b199db54222055fccbb151f5dd100226d54a005a61b60b1e33d42cf6"
+    },
+    {
+      "path": "rust/xray-core/src/dns/tests.rs",
+      "bytes": 30059,
+      "sha256": "5d4e88b68ee2e30455206b0d1bea2c1d34db1a9fdcf029b5f729b7dd69a6dc5f"
+    },
+    {
+      "path": "rust/xray-core/src/dns/wire.rs",
+      "bytes": 15777,
+      "sha256": "8551b7a4f061876f1aab6249f2dc0c8d35e2edb76da2a746afa59f6dea687082"
+    },
+    {
+      "path": "rust/xray-core/src/features.rs",
+      "bytes": 563,
+      "sha256": "e090fb67f0c620c36315917dd00ffbd2f6364b68aaf48d678825f2356eff7808"
+    },
+    {
+      "path": "rust/xray-core/src/features/fixtures/policy.json",
+      "bytes": 312,
+      "sha256": "7689a7e9a509cbc88edf4b662aac6010010f55d0cb36b9c71dbef5bfd96a39a0"
+    },
+    {
+      "path": "rust/xray-core/src/features/observatory.rs",
+      "bytes": 47733,
+      "sha256": "8b925df98f752f107a46ea92186b0b2a399573d8db04cdb3eb0bcc7c992d2b17"
+    },
+    {
+      "path": "rust/xray-core/src/features/observatory/runtime.rs",
+      "bytes": 13755,
+      "sha256": "eb2349baa9e5850b45546625e540f8ff9f7a8252326838bfc5386cdccdced6d9"
+    },
+    {
+      "path": "rust/xray-core/src/features/observatory/WIRING.md",
+      "bytes": 6661,
+      "sha256": "71c9eb6f6c6354b0ad888070dacf6f472eb1f68633bac542ab1e50020f96b69f"
+    },
+    {
+      "path": "rust/xray-core/src/features/policy.rs",
+      "bytes": 13365,
+      "sha256": "a88ed885ccb3afe29a37eafdb37a492cee9a8239494a34a0052b1436cc7ee952"
+    },
+    {
+      "path": "rust/xray-core/src/features/README.md",
+      "bytes": 5031,
+      "sha256": "2216fe461ad0c37d0e4cfe37e36e8c1d67b8ae267a727c1a8bd489a338e209e6"
+    },
+    {
+      "path": "rust/xray-core/src/features/session.rs",
+      "bytes": 21889,
+      "sha256": "3d6131bac1b8c81af62da07e9d8cc6ace37b063bc724465c7e3aa9de8f2db9fb"
+    },
+    {
+      "path": "rust/xray-core/src/features/stats.rs",
+      "bytes": 30574,
+      "sha256": "663f235a34504de4ab6e2f1f6e68a3612249d7c30682411382ba005fc5f08d55"
+    },
+    {
+      "path": "rust/xray-core/src/geodata.rs",
+      "bytes": 17807,
+      "sha256": "c6037d946739cf29417265a0548d04961591ca11881013cbe07b94cbb0618544"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/fixtures/geoip.hex",
+      "bytes": 222,
+      "sha256": "2ebaea3777fe93e76d2c9857b8df0672ec147bbdc3da57995fa68a23259b9ab5"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/fixtures/geosite.hex",
+      "bytes": 388,
+      "sha256": "4303e21373684a3366b06d9458d962f9ad5f092062934c3ced9c620ca764f8a2"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/fixtures/README.md",
+      "bytes": 1048,
+      "sha256": "dbe5cf0e78aa69e4f5dec9bea818559d0343220b23c09017069cb76e1cdbade6"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/matcher.rs",
+      "bytes": 10810,
+      "sha256": "4459aae4ecd8771492a0d84a729b12f1d6f53ae2b73fbb7e37ff10dc87bb66ab"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/README.md",
+      "bytes": 4375,
+      "sha256": "68fd1d4212cc052c7d2aa0d37e567c3130ea7d13d8067dab42f30edd832c883c"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/registry.rs",
+      "bytes": 6613,
+      "sha256": "68f5f2ecbf72031898a325f1d06404f9c14da2b441507ef2b4f22996280ee20d"
+    },
+    {
+      "path": "rust/xray-core/src/geodata/tests.rs",
+      "bytes": 16897,
+      "sha256": "b3fef07f4d38da9c99253501c08b202e8c6c97dfaa182a0ed9942e7b7b956c0e"
+    },
+    {
+      "path": "rust/xray-core/src/lib.rs",
+      "bytes": 377,
+      "sha256": "552ae99ef13665b667a5e0f3aaca9744274418785d851af4186a5a24bd742dff"
+    },
+    {
+      "path": "rust/xray-core/src/logging.rs",
+      "bytes": 39368,
+      "sha256": "4f08922120e1406b71b70aa9e0e891b3c1e47804b6e39719695e625bf93c105d"
+    },
+    {
+      "path": "rust/xray-core/src/mux.rs",
+      "bytes": 40658,
+      "sha256": "fddb9dd9b1bff300d747560dcb5556f8fab1cc3dac22a90e258628fab3ccd1d3"
+    },
+    {
+      "path": "rust/xray-core/src/mux/IMPLEMENTATION.md",
+      "bytes": 9396,
+      "sha256": "e4f1b17a1db796abc497bf1efef7bcfd2aabcb13cdeebe2cbdb05e6f7f2cdeb3"
+    },
+    {
+      "path": "rust/xray-core/src/mux/standalone_tests.rs",
+      "bytes": 124,
+      "sha256": "d9b22c7e1d656867fc85948a39b63f28664a15baf8bcfb6ca70068f6832d3b25"
+    },
+    {
+      "path": "rust/xray-core/src/mux/wire.rs",
+      "bytes": 15579,
+      "sha256": "12c3816bdf08221f67510e2a9e7902d776d1e7d09492844c45b7a4e34f7ce6f5"
+    },
+    {
+      "path": "rust/xray-core/src/mux/xudp.rs",
+      "bytes": 10396,
+      "sha256": "820a0850e5a81b536e70bbb63d6658e9457396614119e5d9b9db17b6f1716d94"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/freedom.rs",
+      "bytes": 9317,
+      "sha256": "72e698a95f2520fbc55f6fd23340ead8d4e16df954090034f26bd19411cbb76e"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/http.rs",
+      "bytes": 5256,
+      "sha256": "9e823649d13a0abe8e30c2ac53dda6807ab9a36918df43d4c8e644b787186284"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/hysteria.rs",
+      "bytes": 21318,
+      "sha256": "64de56db364e88c1fa7fec247654aaa80a828f5e4e394faca5954131a4b67679"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/mod.rs",
+      "bytes": 2352,
+      "sha256": "20bdaba9d8460f0838eb59e8c76a33bdee79c34ff4823a5847313ec191873aa9"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/outbound.rs",
+      "bytes": 23147,
+      "sha256": "3249627d1af163a20e94578f6bb19884888d34d48149879010e2509084421398"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks_session.rs",
+      "bytes": 5832,
+      "sha256": "6f61cc9b75e0f2990c4d3859c363c7cb8688bd33964445bbdcf7c3919ba53361"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks_udp.rs",
+      "bytes": 51085,
+      "sha256": "cb5731c118c37606af32d58a26aa78c0aa55a5e3574537908155da159ce70155"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks.rs",
+      "bytes": 38617,
+      "sha256": "6e6a4e860e158f85275b75a0aad118f9fbde38754ec52393bd10a296646c2c15"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022.rs",
+      "bytes": 8640,
+      "sha256": "028883204d593ecfc5f02e2c13420a8cff20de0281dbaa34a069fdc50ad3fb75"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/codec.rs",
+      "bytes": 8307,
+      "sha256": "6277b4c2482a41cb25ddbad19c08e4d38a16992f604bf572960abc49d5484600"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/fixtures/go-peer/main.go",
+      "bytes": 3203,
+      "sha256": "c220f47862ab1cecd4ca62be8877235bed37b6cccfdb36f3918f5f60e1456136"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/stream.rs",
+      "bytes": 12994,
+      "sha256": "d58010c9930f9786a1c43ae8d1d6a64145aa8fd8281deca244f546fb1b3c931a"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/tests.rs",
+      "bytes": 25605,
+      "sha256": "b9b8976150062c59fd3b7fa75ad985991de1b7153d13fff0380eecd434c06f17"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/udp.rs",
+      "bytes": 8156,
+      "sha256": "faaacc5995cacf03b4b841613649b0353d8e73579bcd067a5d4b96e8a188978b"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/udp/README.md",
+      "bytes": 4229,
+      "sha256": "1463b362d4e5ac1e49e16b2aa64ef6cd89968c2b83d4ecac3c7640881d89fba4"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/shadowsocks2022/udp/tests.rs",
+      "bytes": 22312,
+      "sha256": "70f908b65f0ec56f5f7b1ee518579bebeebfd2e44ee27b38d439b9be9f092384"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/socks.rs",
+      "bytes": 10491,
+      "sha256": "77b4c30abe19c0b252face6f1031a56f1323bbc6b6da017bd4a6cd6c4234a0c0"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/trojan.rs",
+      "bytes": 9758,
+      "sha256": "bc23afa391dd776e95c21f1a5ff2cf455e8e486ccf11e3a4c79cd9a9f03efff9"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun.rs",
+      "bytes": 5715,
+      "sha256": "99a740ac88e598a0cd9b895e3b0a87359b8351f3107c1856d2dee1cf84cc334f"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/native_tests.rs",
+      "bytes": 9810,
+      "sha256": "d33f1a1fa8378722afdc256e475b2ea8f02df5fa27e3965a943e4c12ce2b9859"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/native.rs",
+      "bytes": 16053,
+      "sha256": "8aaa3a6cc9c6a16837008ee48771024f4999ef0ae97f1e53fb4e33505e62cd6a"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/packet_tests.rs",
+      "bytes": 6011,
+      "sha256": "8da59f68ea9a27c27a3e91c2d799be0d25053d568270fc3546ab271a51a6c9cb"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/packet.rs",
+      "bytes": 11417,
+      "sha256": "6511c90ccb11bd18b992412dcd2901487a837dcb7aa6cae0c6e64fa944e962d5"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/route.rs",
+      "bytes": 12355,
+      "sha256": "f3e14ab0aaf346740192ac01f98670b186d72fe08a150e83957d4be75f39a19c"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/tun/session.rs",
+      "bytes": 6524,
+      "sha256": "a79c1c2d1800526b1a5788ecc1d5b4e74c1777935c4746a03fd845254ce8b346"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/udp.rs",
+      "bytes": 35128,
+      "sha256": "39b80de78715ad0c0e17477b330957eec8c901b3e3b6670215ff5c4cc7e54e32"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security.rs",
+      "bytes": 547,
+      "sha256": "9b5e1a072368e6da7bbcc53c581002d74db967a818526f31f49308c8a8d79175"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/derive.rs",
+      "bytes": 7206,
+      "sha256": "85f5b14bba8e319c7b9e8b5b5486d2e15d3ef82ae22cbc6043972130c5b10b63"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/encryption.rs",
+      "bytes": 21642,
+      "sha256": "56c60186c39907f304a273cc3ab0e4865bf94fbfb2421b57372f5a1c61d5a08c"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake.rs",
+      "bytes": 3693,
+      "sha256": "9b6d9ea02e877783865b8bf96a20043bebe82c532b7ae7a5ddde5be267cbec09"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/config.rs",
+      "bytes": 8861,
+      "sha256": "986ea1dce31e5c3c4b975d3b1a095b5bc3288a1d463ea5086e6c691b4651cb4b"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/fixtures/generate.py",
+      "bytes": 7058,
+      "sha256": "36fb0541e5fe0ef2dfc1e96633f71eacd677ad9726d17d3958a11ec9a2ec64c6"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/fixtures/native_aes.json",
+      "bytes": 5607,
+      "sha256": "7d60c5a13f4c53da184172fb6778cf2df7d6b78c3adfd4d3313b76344bd3d37c"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/fixtures/native_chacha.json",
+      "bytes": 5607,
+      "sha256": "4e1a8ed8d4f9e4eb5687f8d0d855b78716bc6acaeae19db118280755322d18d1"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/fixtures/relay_aes.json",
+      "bytes": 5735,
+      "sha256": "074e778dcf434377f1e7e4e58f885c1c88936e4aea230c4694a9d2955e448659"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/keys.rs",
+      "bytes": 7587,
+      "sha256": "75ac95dd97ed3ccf13805c0fdc6024133d532846aee9ac8e03fece18e8db1e34"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/relay.rs",
+      "bytes": 5498,
+      "sha256": "cfddc0de18fe455c9338d74bfe413aa4d45913fe4848a3038019a17e95c20530"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/stream.rs",
+      "bytes": 7305,
+      "sha256": "107f18f5bd1f995030d9c528041b1c93e7d0ae12192b3f824a9d58ab274536cc"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/tests.rs",
+      "bytes": 26919,
+      "sha256": "0011dd66f07c5b0b80b629edb2610ce3dc4b7921f290d8d59c7c708fdc36b6c4"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/handshake/wire.rs",
+      "bytes": 10196,
+      "sha256": "97ea9878ff2aa0288ecc7532a18c9c5d51bb02dc40b260e2c8ad2747b6eb0e52"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless_security/vision.rs",
+      "bytes": 18450,
+      "sha256": "ea0a31a819062f31652d7223d9abe4dd3ffb85507cd722dc215476e639d99a47"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vless.rs",
+      "bytes": 16371,
+      "sha256": "f696aa9b90c300ae6d62cc45063e1d62638c779bdd3579fa4d936f0816f81748"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vmess.rs",
+      "bytes": 15133,
+      "sha256": "0e6c96487b18709746b36a106fa72923a6f699c09cad8aa2fe2e1c2dad23c315"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vmess/crypto.rs",
+      "bytes": 25364,
+      "sha256": "5274ca2efda89f7a4750b0a2d7771f1e58b63820db48e7667d22b03e8c4938ca"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vmess/encoding.rs",
+      "bytes": 44426,
+      "sha256": "645de690eddd06f379781f73a153b8b19d99708727a3670a73ef71180fb9368e"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/vmess/stream.rs",
+      "bytes": 39973,
+      "sha256": "e96d501c80626e450fa4f3640fbf98774a4586f47eb5a61719cc14f263e1288c"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/wireguard.rs",
+      "bytes": 1064,
+      "sha256": "9af5f4e0af3231d64dbc9398544670ec7d74888726f2840cf096e5483e37f022"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/wireguard/config.rs",
+      "bytes": 13292,
+      "sha256": "e0bd09bc2d1466847b3d4a072ec46e0634961342b5e8b2ed49e7feebcec3ebf4"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/wireguard/engine.rs",
+      "bytes": 19124,
+      "sha256": "1467590842d37eb1b5e2e59780fbe025eea533bedf7169d5ebbe0a700e346456"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/wireguard/routes.rs",
+      "bytes": 3067,
+      "sha256": "2d5c62019189051485fdbbd2f4bdd0fe562f56d47e2c06c0dcc22847f52d5e35"
+    },
+    {
+      "path": "rust/xray-core/src/protocol/wireguard/tests.rs",
+      "bytes": 20162,
+      "sha256": "291f47d8a181fdfaa63a9b7f11d68c65f105f30b5b426f759d31193deeb82269"
+    },
+    {
+      "path": "rust/xray-core/src/reverse.rs",
+      "bytes": 24043,
+      "sha256": "11bc88bee2afff2b81d5fd06ac916ee95a4b340b577beca6d78dfc966f461c92"
+    },
+    {
+      "path": "rust/xray-core/src/reverse/control.rs",
+      "bytes": 5183,
+      "sha256": "b7b4a11157ca0788e23441c773dc7316d42d8c94ca445ecf463afa019e8a002f"
+    },
+    {
+      "path": "rust/xray-core/src/router.rs",
+      "bytes": 23434,
+      "sha256": "e508a8735839be05ec6bbf8916f130c94fc3cca0866b00e5723d23b3e25385b2"
+    },
+    {
+      "path": "rust/xray-core/src/router/balancer.rs",
+      "bytes": 48291,
+      "sha256": "5b9b3b81d97fe615de291263d9ff87ead9041dc6bd756b4c40893690d11bb441"
+    },
+    {
+      "path": "rust/xray-core/src/runtime.rs",
+      "bytes": 29529,
+      "sha256": "1237a6dce4a7a8dff43f4d635992d2162bccfb2e843de78a42a443c49eb957ac"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/accounting.rs",
+      "bytes": 2593,
+      "sha256": "c5dee96be40668394928f648085243ad20790715c0d16fb886a33bf4b104940f"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/admission.rs",
+      "bytes": 589,
+      "sha256": "db72bcfe030126f4937b3f563d21f12342be5434d920689866e90dce63be7b47"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/observatory.rs",
+      "bytes": 2504,
+      "sha256": "7b84756e0abb66332ae63f82b1692ec407e6b86578e545159bf88949a443a7d6"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/udp_integration.rs",
+      "bytes": 4087,
+      "sha256": "6039cfa8517df721e7acc9e36deaecfebab9cf9d0d7e950e7d4c68bc2a94ad57"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/udp_routing.rs",
+      "bytes": 20086,
+      "sha256": "1d3d759119391e68cfdeef93c94da84bd8bca31fbc52a482400322b644ff6973"
+    },
+    {
+      "path": "rust/xray-core/src/runtime/udp.rs",
+      "bytes": 50094,
+      "sha256": "8d760ea1e73541df8a9e8621297f85a19ff41de633bc877ddb989711c36e0045"
+    },
+    {
+      "path": "rust/xray-core/src/transport.rs",
+      "bytes": 11543,
+      "sha256": "299495584ceabffffabc05a41828eeadfc604913b0857ff239f04ce1c1713d40"
+    },
+    {
+      "path": "rust/xray-core/src/transport/finalmask.rs",
+      "bytes": 2460,
+      "sha256": "446bb1501758341f5b446e85c59e95da552c8dba7b25f4faf14abaa3e9db2ecf"
+    },
+    {
+      "path": "rust/xray-core/src/transport/finalmask/custom.rs",
+      "bytes": 31056,
+      "sha256": "653a3fc2f6e946dbd5c694d8f88f6368e92474043e2692c1a45e2c2e55f8c94c"
+    },
+    {
+      "path": "rust/xray-core/src/transport/finalmask/fragment.rs",
+      "bytes": 8438,
+      "sha256": "7746b5ee7ff5854b283b017636f5fa6a1fcea55064574734b3d494d45c96aef5"
+    },
+    {
+      "path": "rust/xray-core/src/transport/finalmask/noise.rs",
+      "bytes": 6776,
+      "sha256": "a29063dd2149362948dc887440ec9daacd93e57d10c01124b82d0e59228d4cd1"
+    },
+    {
+      "path": "rust/xray-core/src/transport/finalmask/salamander.rs",
+      "bytes": 16580,
+      "sha256": "e5a9e761b1ef53a4b2f1405369684513bccd7e016c0c2bdf922925b901bb81b6"
+    },
+    {
+      "path": "rust/xray-core/src/transport/grpc.rs",
+      "bytes": 58531,
+      "sha256": "61f7979706348e7697c53a4b1e3ab4b9652cedf946b20339d8ed1be6c53237fc"
+    },
+    {
+      "path": "rust/xray-core/src/transport/httpupgrade.rs",
+      "bytes": 54850,
+      "sha256": "2598ba83a580b8f616e01075d821ed0b25d7c067fe78ef7b18f18c0509bc7f81"
+    },
+    {
+      "path": "rust/xray-core/src/transport/hysteria.rs",
+      "bytes": 34542,
+      "sha256": "c7db8697666f6fbea6c0d793e63c3d332edfad6508484cec12997d199f1a5a7b"
+    },
+    {
+      "path": "rust/xray-core/src/transport/kcp.rs",
+      "bytes": 35267,
+      "sha256": "91c6234d8175df19a9b057fd22035078655ad3d8fb1dcdb1259e944335c89392"
+    },
+    {
+      "path": "rust/xray-core/src/transport/kcp/adapter.rs",
+      "bytes": 13150,
+      "sha256": "21580ca35f6c7d5f22664f575d12e46078f6e0c328516ffe476e25a60ed5ef8a"
+    },
+    {
+      "path": "rust/xray-core/src/transport/kcp/portable_tests.rs",
+      "bytes": 137,
+      "sha256": "0a71ac77e2861a98a48b77513d85d53b1d0cc1f39f238e512eed549370505586"
+    },
+    {
+      "path": "rust/xray-core/src/transport/kcp/session.rs",
+      "bytes": 34156,
+      "sha256": "526327853defda2fe158b42122a6063f20fce218e72973d1d72f0c97265d9210"
+    },
+    {
+      "path": "rust/xray-core/src/transport/kcp/wire.rs",
+      "bytes": 11252,
+      "sha256": "dfb01c10aeb2d033a2f57e3a8beaf9ce18b05fc58305051d0d614d6b8e1edf74"
+    },
+    {
+      "path": "rust/xray-core/src/transport/proxy_protocol.rs",
+      "bytes": 40418,
+      "sha256": "50eeb2860bf650767cf96e3cee3cc13411b3e75457221298a11c433520d1679e"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality.rs",
+      "bytes": 34461,
+      "sha256": "1bc0a2899baae9164b7ab76b473503bc0a93c13973d321955cb750cc3ae231ce"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake.rs",
+      "bytes": 17184,
+      "sha256": "329c20ae251d1cad0ebac7abaf9595f2dac7389d4a4c37c2d1e923940cd6e752"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/crypto.rs",
+      "bytes": 12719,
+      "sha256": "2550a38932ef1d75ddd549e8317e836c1bdbe78869f2c2ec40a26cd6e7bc8e6a"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/interop/main.go",
+      "bytes": 3734,
+      "sha256": "e3dfec2a7b89b2b44c0d092b9354e33110406df323460dbc16296976a87945a0"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server.rs",
+      "bytes": 13092,
+      "sha256": "882ef7f91bd2e360e575b81793988247e37baab1befdd30feef163c11673ee51"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server/certificate.rs",
+      "bytes": 2601,
+      "sha256": "0d6ed8f318a01deeb9787529fcb6ad2cfb6986bbf6b020e037e8a4b68ea514da"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server/hello.rs",
+      "bytes": 11553,
+      "sha256": "392b8ccc258e95818549908d95438b22dc0f82580f8d40c3ebbcb22868ddd730"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server/interop/main.go",
+      "bytes": 3916,
+      "sha256": "6ca69562b2e69a59c618203e8492e7f1647de72b933b97cf29873b9d4d751fb4"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server/target.rs",
+      "bytes": 13722,
+      "sha256": "933b970e41235a3f56997dafa88dd1b7b2a03dd9e84361d8e57b4f43d60ff829"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/server/tests.rs",
+      "bytes": 40484,
+      "sha256": "03c2e3127a850090ecce8186151d0e2923c2c453094eb7d98f7c0d62fae4f082"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/stream.rs",
+      "bytes": 10836,
+      "sha256": "3c5e7c3661266124593e10f2c7e07af78d61300e2e103e641822e0d7574a82b5"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/tests.rs",
+      "bytes": 25620,
+      "sha256": "32aadb38538fc07bf7aa55999102d5421148484aeff2ef40a1834ac93edbc30a"
+    },
+    {
+      "path": "rust/xray-core/src/transport/reality/handshake/wire.rs",
+      "bytes": 11842,
+      "sha256": "33e78bb7b6eadb9232bdee19cb97fe96ad2c1485b95f068f244615a117c2782f"
+    },
+    {
+      "path": "rust/xray-core/src/transport/tls.rs",
+      "bytes": 36656,
+      "sha256": "7ece049970f454b96fa8615341974f25de00ce9b13a62d07275b41fc688b9ea3"
+    },
+    {
+      "path": "rust/xray-core/src/transport/websocket.rs",
+      "bytes": 76239,
+      "sha256": "76d0fac55f13178b1c9efb10d799713521d776e4bbf1704f1760920fc7be35d5"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive.rs",
+      "bytes": 5911,
+      "sha256": "220398cfa302d6c32623f3c6d44c43294fe514eda216f75c8cce30a1ce58392d"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/connection.rs",
+      "bytes": 10772,
+      "sha256": "8b0fc6c43c081e6f56a75cdc0d02d97cc598f21334d94626376ff2e837773a1e"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/interop/main.go",
+      "bytes": 1758,
+      "sha256": "176de32bbce06e1fd7033f1a16a4456b2eee61609d03bc6cf8ddddd173b4d7b5"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/session.rs",
+      "bytes": 9913,
+      "sha256": "74b2fe6496d478a825deb0bb3e4e9af9729f4459096fa05f4678dcfa5d9b808c"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/storage.rs",
+      "bytes": 10318,
+      "sha256": "38b56d05b07b33cd6e5648769f409a1923c7b6aec63f7fe1abf7f71f1079c62c"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/template.rs",
+      "bytes": 23435,
+      "sha256": "453babc42b7a44ac648fc8652567e56fefbee8309343d5d4e6bd88790c379984"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/template/tests.rs",
+      "bytes": 24533,
+      "sha256": "1c803d607fb9008b91c99c6df3c01125528a9d6b2dca664c9f95531642b40d94"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/tests.rs",
+      "bytes": 26270,
+      "sha256": "068bd2e9201d93f394df1a29d4da1591848c1a9419db4303e6d56fe0230989d0"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/wal.rs",
+      "bytes": 14866,
+      "sha256": "fc11198da82dd18a8f65c227911d0cb36e28933881eb0bac85fe5d754b18ca61"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xdrive/wire.rs",
+      "bytes": 3718,
+      "sha256": "a045687d53f48f880ffb9b319e08152d4cfbdf64e1e766378f655ab377c3b78b"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xhttp.rs",
+      "bytes": 87520,
+      "sha256": "11aec00e2065c940ce372eb9f8f10599005a9fe7dfd8de89badfa1969d289215"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xhttp/http2.rs",
+      "bytes": 46788,
+      "sha256": "60931dc807291645b9085645731e77ee7ed48b222a5f28d2363afcf3f6644410"
+    },
+    {
+      "path": "rust/xray-core/src/transport/xhttp/streaming_tests.rs",
+      "bytes": 19168,
+      "sha256": "ebb45142f7a8c38cc6e7e7d8689dbd8579bb411330fc3470b3c8b3bc9278e249"
+    },
+    {
+      "path": "rust/xray-core/src/user.rs",
+      "bytes": 1518,
+      "sha256": "c97aec8ff0d38b1519860cfd8be939b2fee9c8cb9e1753a04499f73d1025d2bf"
+    },
+    {
+      "path": "rust/xray-core/tests/grpc_runtime.rs",
+      "bytes": 15442,
+      "sha256": "29f2bf57d9a422f59f624146c6aec9dd6c87d350cc617c703d61e5ca2dddbc70"
+    },
+    {
+      "path": "rust/xray-core/tests/kcp_runtime.rs",
+      "bytes": 9791,
+      "sha256": "3da13f21fefc6be9899d6ba742f06f9b7912e189023f0c7a12f443cea095b8ca"
+    },
+    {
+      "path": "rust/xray-core/tests/observatory_runtime.rs",
+      "bytes": 9856,
+      "sha256": "8b0a6ca9d2d31790dccbb3cdeacf4e55a0b0ec3905489ae45584c6a266f2f8c7"
+    },
+    {
+      "path": "rust/xray-core/tests/proxy.rs",
+      "bytes": 26898,
+      "sha256": "441968bd0d501ed282c8d04d39070e1fd5fcb729e01828003ce8ba8d3d81adcf"
+    },
+    {
+      "path": "rust/xray-core/tests/runtime_accounting.rs",
+      "bytes": 14034,
+      "sha256": "d04d90cdc5648edb08a0711286921e6d4af685082ccba5b512de729646afbc5b"
+    },
+    {
+      "path": "rust/xray-core/tests/socks_udp_runtime.rs",
+      "bytes": 9046,
+      "sha256": "bcdb4f1956978e151be2ac884b508ec2c82168dcc274d06aa832f7ca61baf8e8"
+    },
+    {
+      "path": "rust/xray-proto/build.rs",
+      "bytes": 1236,
+      "sha256": "174cc297e289bb53d0e422bf7834a18f304c82c6cdce24c1c28e9992848ea099"
+    },
+    {
+      "path": "rust/xray-proto/Cargo.toml",
+      "bytes": 432,
+      "sha256": "10257f4272738919398a434ae4483a5e5d63e518bdc23595876bd7518ad08f72"
+    },
+    {
+      "path": "rust/xray-proto/src/lib.rs",
+      "bytes": 2427,
+      "sha256": "ec09880e406d9e835648fea931d4f733354bdfeccae596577b53aaa4d6bbbaea"
+    },
+    {
+      "path": "rust/xray/Cargo.toml",
+      "bytes": 864,
+      "sha256": "687eb35c1961ffcafa753029179f9ef51ce6e40710641b81ba328126fe12be80"
+    },
+    {
+      "path": "rust/xray/src/commands.rs",
+      "bytes": 8007,
+      "sha256": "bb645b17e5175bbc7fee4690dd1885d99a1579ab28901917bfde1193679b9063"
+    },
+    {
+      "path": "rust/xray/src/commands/api.rs",
+      "bytes": 38618,
+      "sha256": "5907d9a8ea7a27d49a596adfff2e689ecf51616b00ea25e7a19f0d8a3a430d7e"
+    },
+    {
+      "path": "rust/xray/src/commands/certificate.rs",
+      "bytes": 16245,
+      "sha256": "6b8fee54204c99fdff25e10f08a6ca1bda04ee2278d2c33965cd096876991762"
+    },
+    {
+      "path": "rust/xray/src/commands/ech.rs",
+      "bytes": 9318,
+      "sha256": "8e62e4ac371fe6c64b6587810d7900ef836185704e283708a3414a4ea9a7b887"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/ca.pem",
+      "bytes": 700,
+      "sha256": "0a2fb427286c395f0f168175ef31a774f7c58033a9e7dd55cfa16ceff3ed1d04"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/ech-sequence.txt",
+      "bytes": 362,
+      "sha256": "8ee3b08f31f19e63881feb44664918a81b664520c196e2d40afea87d1883e1d2"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/mldsa65-sequence.txt",
+      "bytes": 2662,
+      "sha256": "fbf8d018c67f96e78a20c01a177735e5894ae6017a6f0643f86cd5a96c305269"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/mldsa65-zero.txt",
+      "bytes": 2662,
+      "sha256": "6070861689763d6077f4a533fd6524c3e45ef7f4dd2a7fa9dbb47b5ad97802c6"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/mlkem768-sequence.txt",
+      "bytes": 1733,
+      "sha256": "404d86f48e61b21d93400d958020d77e987b57794d784454ee27c299fdecc68d"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/mlkem768-zero.txt",
+      "bytes": 1733,
+      "sha256": "253d7f46c00c00d77002a811010ed0d033b845b840591ceebdd8dd8a4c40d42c"
+    },
+    {
+      "path": "rust/xray/src/commands/fixtures/README.md",
+      "bytes": 1136,
+      "sha256": "2ba1bc8b0e6ca56f5d01edd55638d7183a290f94e055b741c14ccdf5f20c7452"
+    },
+    {
+      "path": "rust/xray/src/commands/ping.rs",
+      "bytes": 11254,
+      "sha256": "ded969f25a816f0c8c86d462055509ef2a32dbb94a86aaf3a84abf3854f5ddd2"
+    },
+    {
+      "path": "rust/xray/src/commands/post_quantum.rs",
+      "bytes": 6446,
+      "sha256": "b8934d894d5fb7c420d055db97f8d8a4e7c99c3f0a4be34164257237b4c5b5eb"
+    },
+    {
+      "path": "rust/xray/src/config_loader.rs",
+      "bytes": 37352,
+      "sha256": "d995b0f9518e6dd4a28a4a1d7369980c84e2e59aea4a52f0d2973ef712e15deb"
+    },
+    {
+      "path": "rust/xray/src/main.rs",
+      "bytes": 8561,
+      "sha256": "1b65621ee03c1f6574628fe39bd22d602980914b9470c1bbf7ac83703913d3ff"
+    },
+    {
+      "path": "rust/xray/tests/cli.rs",
+      "bytes": 2492,
+      "sha256": "7c2a722cdc8d5e857175406875a2360c6bad0a05a1e58bf36d7c1c2ba5c0e29e"
+    },
+    {
+      "path": "rust/xray/tests/interop.rs",
+      "bytes": 20662,
+      "sha256": "0cce604897431ae20feda34e4b6283bffb7fdbaed6d4958180e7af8f3f3e14ac"
+    },
+    {
+      "path": "rust/xray/tests/protobuf.rs",
+      "bytes": 3732,
+      "sha256": "f95fe90f576a219195d3d38ed0ccfc98493a4bf9b9feefa00e114d76cf8bcd9b"
+    },
+    {
+      "path": "rust/xray/tests/transport_interop.rs",
+      "bytes": 22454,
+      "sha256": "4354bf5ec6050ec6a96937bcadb0a897cd8af7c1ccb421bc1d840091556bac21"
+    },
+    {
+      "path": "rust/xray/tests/xhttp_modes.rs",
+      "bytes": 17977,
+      "sha256": "fd462c4ed09f36b0df802eed5f1483dd694de89d6fc136790962d0f6f0e7dcae"
+    }
+  ],
+  "referenceArtifacts": [
+    {
+      "path": "target/reference-xray.exe",
+      "bytes": 48104448,
+      "sha256": "8aeb5d56dbc9f09bb5c21ae47c7b972d88d70c4c4910a72cc616dbd71a94d5fa"
+    },
+    {
+      "path": "target/reality-reference-server.exe",
+      "bytes": 12703744,
+      "sha256": "6187841f7a5b0acd07fdd1fcad92b6d37b84fc5208bb78dc60519bbe6db002db"
+    },
+    {
+      "path": "target/reality-reference-client.exe",
+      "bytes": 17249792,
+      "sha256": "847a9adfa0cbc08977732bee4c77d3d0c35fc6f1d5d99075d053343d40c2319d"
+    },
+    {
+      "path": "target/ss2022-reference.exe",
+      "bytes": 4963840,
+      "sha256": "246e432fb2720622fa18207acf05fa985c203738f71688f938cceced2258c52c"
+    },
+    {
+      "path": "target/xdrive-reference.exe",
+      "bytes": 18362368,
+      "sha256": "1552586ea19917420f204890fcbd7f86c768fa22154029817b164be409f4e7ed"
+    }
+  ]
+}
