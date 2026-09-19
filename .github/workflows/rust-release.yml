@@ -1,0 +1,116 @@
+name: Rust migration packages (build only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_container:
+        description: Also build, smoke-check and archive the Linux amd64 container (no push)
+        type: boolean
+        default: false
+  push:
+    paths:
+      - 'rust/**'
+      - '**/*.proto'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-release.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '**/*.proto'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check packaging contracts without compiling Rust
+        run: python -B -m unittest discover -s rust/packaging -p 'test_*.py' -v
+      - name: Read the configured native target matrix
+        id: matrix
+        shell: bash
+        run: echo "matrix=$(python -B rust/packaging/package.py matrix)" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: plan
+    name: Native package (${{ matrix.rust_target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install the native stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Build, smoke-check and package the partial migration
+        env:
+          PACKAGE_TARGET: ${{ matrix.rust_target }}
+          SOURCE_REVISION: ${{ github.sha }}
+        shell: bash
+        run: python -B rust/packaging/package.py build --target "$PACKAGE_TARGET" --revision "$SOURCE_REVISION" --output target/rust-dist
+      - name: Upload build artifacts (not GitHub release assets)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-partial-${{ matrix.rust_target }}
+          path: target/rust-dist/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  container:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_container
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build the native Linux amd64 image
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: docker build --file rust/packaging/Dockerfile --build-arg "SOURCE_REVISION=$SOURCE_REVISION" --tag xray-rust:partial .
+      - name: Run the image without network access
+        run: |
+          docker run --rm --network none xray-rust:partial version
+          docker run --rm --network none xray-rust:partial run --config /opt/xray-rust/examples/socks-direct.json --test
+      - name: Save the image without publishing it
+        shell: bash
+        run: |
+          mkdir -p target/rust-container
+          docker save xray-rust:partial | gzip -n > target/rust-container/Xray-rust-partial-linux-amd64.docker.tar.gz
+          cd target/rust-container
+          sha256sum Xray-rust-partial-linux-amd64.docker.tar.gz > Xray-rust-partial-linux-amd64.docker.tar.gz.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-partial-linux-amd64-container
+          path: target/rust-container/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

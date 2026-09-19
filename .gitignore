@@ -28,8 +28,8 @@
 *.bz2
 
 # Go build binaries
-xray
-xray_softfloat
+/xray
+/xray_softfloat
 mockgen
 vprotogen
 !infra/vprotogen/
@@ -58,6 +58,12 @@ coverage.*
 
 # Node modules (in case of frontend assets)
 node_modules/
+
+# Rust build output (keep Cargo.lock for reproducible executable builds)
+/target/
+
+# Temporary validation harness whose cleanup was blocked by approval review
+/rust/xray-core/src/geodata/validation-41b0aeb1317a4f1fae67274ba19d34aa/
 
 # System files
 Thumbs.db

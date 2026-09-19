@@ -1,0 +1,81 @@
+[workspace]
+members = ["rust/xray", "rust/xray-core", "rust/xray-proto"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+repository = "https://github.com/XTLS/Xray-core"
+
+[workspace.dependencies]
+anyhow = "1"
+aes-gcm = "0.10"
+base64 = "0.22"
+blake3 = "1"
+blake2 = "0.10"
+boringtun = { version = "0.7.1", default-features = false }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["clock"] }
+ed25519-dalek = "2"
+hkdf = "0.12"
+hmac = "0.12"
+h2 = "0.4"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+httparse = "1"
+ipnet = "2"
+md-5 = "0.10"
+ml-kem = { version = "0.3.2", features = ["zeroize"] }
+ml-dsa = "0.1.1"
+prost = "0.14"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rand = "0.8"
+rcgen = "0.14"
+regex = "1"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2", "gzip"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+sha1 = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+time = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+webpki-roots = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+x509-parser = "0.18"
+xray-core = { path = "rust/xray-core" }
+xray-proto = { path = "rust/xray-proto" }
+zeroize = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
