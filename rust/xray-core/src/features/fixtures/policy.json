@@ -1,0 +1,8 @@
+{
+  "levels": {
+    "0": {"handshake": 0, "statsUserOnline": true, "bufferSize": 0},
+    "1": {"connIdle": 600, "uplinkOnly": 3, "downlinkOnly": 7, "statsUserUplink": true, "statsUserDownlink": true, "bufferSize": -9},
+    "2": null
+  },
+  "system": {"statsInboundUplink": true, "statsOutboundDownlink": true}
+}
