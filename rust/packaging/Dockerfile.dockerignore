@@ -1,0 +1,13 @@
+# This Dockerfile-specific file applies when building with repository-root context.
+.git
+.github
+.codex
+target
+**/target
+**/__pycache__
+**/.venv
+resources
+build_assets
+*.zip
+*.tar.gz
+*.dgst

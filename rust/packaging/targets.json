@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "status": "partial-native-rust-migration",
+  "native_ci": [
+    {"go_target": "linux-amd64", "rust_target": "x86_64-unknown-linux-gnu", "runner": "ubuntu-24.04"},
+    {"go_target": "linux-arm64", "rust_target": "aarch64-unknown-linux-gnu", "runner": "ubuntu-24.04-arm"},
+    {"go_target": "windows-amd64", "rust_target": "x86_64-pc-windows-msvc", "runner": "windows-2022"},
+    {"go_target": "darwin-amd64", "rust_target": "x86_64-apple-darwin", "runner": "macos-15-intel"},
+    {"go_target": "darwin-arm64", "rust_target": "aarch64-apple-darwin", "runner": "macos-15"}
+  ],
+  "unvalidated": [
+    {"go_target": "windows-386", "rust_target": "i686-pc-windows-msvc", "blocker": "No native CI build or runtime validation; needs 32-bit MSVC tooling."},
+    {"go_target": "windows-arm64", "rust_target": "aarch64-pc-windows-msvc", "blocker": "No native CI build or runtime validation; native dependency and Windows ARM64 validation pending."},
+    {"go_target": "linux-386", "rust_target": "i686-unknown-linux-gnu", "blocker": "32-bit libc, linker, native dependencies and runtime validation pending."},
+    {"go_target": "linux-arm5", "rust_target": "armv5te-unknown-linux-gnueabi", "blocker": "ARM instruction baseline, EABI/sysroot and native dependency validation pending."},
+    {"go_target": "linux-arm6", "rust_target": "arm-unknown-linux-gnueabihf", "blocker": "Candidate only: GOARM=6 does not establish hard-float ABI equivalence; sysroot and dependency validation pending."},
+    {"go_target": "linux-arm7", "rust_target": "armv7-unknown-linux-gnueabihf", "blocker": "Candidate only: verify float ABI, ARMv7 baseline, sysroot and dependencies."},
+    {"go_target": "linux-riscv64", "rust_target": "riscv64gc-unknown-linux-gnu", "blocker": "RISC-V ISA baseline, native dependencies, sysroot and runtime validation pending."},
+    {"go_target": "linux-loong64", "rust_target": "loongarch64-unknown-linux-gnu", "blocker": "Native dependency, sysroot and runtime validation pending."},
+    {"go_target": "linux-mips64", "rust_target": "mips64-unknown-linux-gnuabi64", "blocker": "Toolchain/std availability, native crypto, ABI and sysroot validation pending."},
+    {"go_target": "linux-mips64le", "rust_target": "mips64el-unknown-linux-gnuabi64", "blocker": "Toolchain/std availability, native crypto, ABI and sysroot validation pending."},
+    {"go_target": "linux-mips", "rust_target": "mips-unknown-linux-gnu", "blocker": "Toolchain/std availability, native crypto, float ABI and sysroot validation pending."},
+    {"go_target": "linux-mipsle", "rust_target": "mipsel-unknown-linux-gnu", "blocker": "Toolchain/std availability, native crypto, float ABI and sysroot validation pending."},
+    {"go_target": "linux-mips-softfloat", "rust_target": null, "blocker": "No validated equivalent to the Go release's GOMIPS=softfloat executable; requires an explicit ABI/toolchain decision."},
+    {"go_target": "linux-mipsle-softfloat", "rust_target": null, "blocker": "No validated equivalent to the Go release's GOMIPS=softfloat executable; requires an explicit ABI/toolchain decision."},
+    {"go_target": "linux-ppc64", "rust_target": "powerpc64-unknown-linux-gnu", "blocker": "Big-endian ABI, native dependency, sysroot and runtime validation pending."},
+    {"go_target": "linux-ppc64le", "rust_target": "powerpc64le-unknown-linux-gnu", "blocker": "Native dependency, sysroot and runtime validation pending."},
+    {"go_target": "linux-s390x", "rust_target": "s390x-unknown-linux-gnu", "blocker": "Native dependency, sysroot and runtime validation pending."},
+    {"go_target": "android-amd64", "rust_target": "x86_64-linux-android", "blocker": "Android NDK/API level, packaging, system integration and device tests pending."},
+    {"go_target": "android-arm64", "rust_target": "aarch64-linux-android", "blocker": "Android NDK/API level, packaging, system integration and device tests pending."},
+    {"go_target": "freebsd-amd64", "rust_target": "x86_64-unknown-freebsd", "blocker": "FreeBSD sysroot/toolchain, native dependencies and runtime validation pending."},
+    {"go_target": "freebsd-386", "rust_target": "i686-unknown-freebsd", "blocker": "FreeBSD 32-bit sysroot/toolchain, native dependencies and runtime validation pending."},
+    {"go_target": "freebsd-arm64", "rust_target": "aarch64-unknown-freebsd", "blocker": "FreeBSD ARM64 sysroot/toolchain, native dependencies and runtime validation pending."},
+    {"go_target": "freebsd-arm7", "rust_target": "armv7-unknown-freebsd", "blocker": "Toolchain/std availability, FreeBSD ARM ABI and native dependency validation pending."},
+    {"go_target": "openbsd-amd64", "rust_target": "x86_64-unknown-openbsd", "blocker": "OpenBSD toolchain/sysroot, native dependencies and runtime validation pending."},
+    {"go_target": "openbsd-386", "rust_target": "i686-unknown-openbsd", "blocker": "Toolchain/std availability, OpenBSD 32-bit dependencies and runtime validation pending."},
+    {"go_target": "openbsd-arm64", "rust_target": "aarch64-unknown-openbsd", "blocker": "OpenBSD ARM64 toolchain/sysroot, native dependencies and runtime validation pending."},
+    {"go_target": "openbsd-arm7", "rust_target": null, "blocker": "No corresponding armv7 OpenBSD target in the inspected Rust target list; custom target/toolchain and dependencies pending."}
+  ]
+}
