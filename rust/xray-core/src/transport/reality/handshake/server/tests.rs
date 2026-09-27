@@ -122,10 +122,15 @@ fn hello_parser_rejects_truncation_duplicate_extensions_and_missing_requirements
     }
     let duplicate = replace_extensions(&hello, |items| items.push(items[0].clone()));
     assert!(hello::Offer::parse(&duplicate).is_err());
-    for id in [0, 10, 13, 43] {
+    for id in [0, 10, 43] {
         let missing = replace_extensions(&hello, |items| items.retain(|(kind, _)| *kind != id));
         assert!(hello::Offer::parse(&missing).is_err(), "missing {id}");
     }
+    // The pinned Go REALITY server forces Ed25519 for its synthetic
+    // certificate and never consults signature_algorithms, so a hello without
+    // extension 13 (like every browser fingerprint) must stay acceptable.
+    let no_signatures = replace_extensions(&hello, |items| items.retain(|(k, _)| *k != 13));
+    hello::Offer::parse(&no_signatures).unwrap();
     for id in [41, 42] {
         let unsupported = replace_extensions(&hello, |items| items.push((id, vec![])));
         assert_eq!(

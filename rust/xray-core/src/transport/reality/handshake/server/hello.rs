@@ -15,7 +15,6 @@ pub(super) struct Offer<'a> {
     suites: Vec<u16>,
     groups: Vec<u16>,
     shares: Vec<(u16, &'a [u8])>,
-    signatures: Vec<u16>,
     alpn: Vec<&'a [u8]>,
 }
 
@@ -27,7 +26,7 @@ pub(super) struct Selected<'a> {
 }
 
 fn u16_list(bytes: &[u8]) -> io::Result<Vec<u16>> {
-    if bytes.is_empty() || bytes.len() % 2 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
         return Err(invalid("invalid TLS u16 list"));
     }
     Ok(bytes
@@ -64,7 +63,6 @@ impl<'a> Offer<'a> {
             suites,
             groups: vec![],
             shares: vec![],
-            signatures: vec![],
             alpn: vec![],
         };
         let mut seen = BTreeSet::new();
@@ -92,7 +90,6 @@ impl<'a> Offer<'a> {
                     }
                 }
                 10 => result.groups = u16_list(field.vec16()?)?,
-                13 => result.signatures = u16_list(field.vec16()?)?,
                 16 => {
                     let mut protocols = Cursor::new(field.vec16()?);
                     if protocols.rest.is_empty() {
@@ -133,14 +130,11 @@ impl<'a> Offer<'a> {
             }
             field.done()?;
         }
-        if !tls13
-            || result.server_name.is_empty()
-            || result.groups.is_empty()
-            || !result.signatures.contains(&0x0807)
-        {
-            return Err(invalid(
-                "ClientHello lacks TLS 1.3, SNI, groups or Ed25519 signature support",
-            ));
+        // The pinned Go REALITY server forces Ed25519 for its synthesized
+        // certificate and never consults the client's signature_algorithms
+        // list, so browser fingerprints without 0x0807 must stay acceptable.
+        if !tls13 || result.server_name.is_empty() || result.groups.is_empty() {
+            return Err(invalid("ClientHello lacks TLS 1.3, SNI or groups support"));
         }
         // Every offered key share, including unknown/GREASE groups, must also
         // appear in supported_groups. Unknown extensions/groups are not selected.
@@ -189,11 +183,7 @@ impl<'a> Offer<'a> {
         let alpn = config
             .alpn
             .iter()
-            .find(|protocol| {
-                self.alpn
-                    .iter()
-                    .any(|offered| *offered == protocol.as_slice())
-            })
+            .find(|protocol| self.alpn.contains(&protocol.as_slice()))
             .cloned();
         if !config.alpn.is_empty() && !self.alpn.is_empty() && alpn.is_none() {
             return Err(invalid("no common ALPN protocol"));

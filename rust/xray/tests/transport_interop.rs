@@ -143,10 +143,10 @@ impl Fixture {
         Ok(())
     }
     fn check_alive(&mut self) -> Result<()> {
-        if let Some(child) = &mut self.child {
-            if let Some(status) = child.try_wait()? {
-                bail!("Go reference exited during transport case: {status}");
-            }
+        if let Some(child) = &mut self.child
+            && let Some(status) = child.try_wait()?
+        {
+            bail!("Go reference exited during transport case: {status}");
         }
         Ok(())
     }
@@ -229,12 +229,22 @@ impl PortReservation {
 fn socks_inbound(address: SocketAddr) -> Value {
     json!({"listen":"127.0.0.1","port":address.port(),"protocol":"socks","settings":{"auth":"noauth","udp":false}})
 }
-fn go_server_config(case: Case, address: SocketAddr, readiness: SocketAddr) -> Value {
+fn go_server_config(
+    case: Case,
+    address: SocketAddr,
+    readiness: SocketAddr,
+    target: SocketAddr,
+) -> Value {
     json!({"log":{"loglevel":"debug"}, "inbounds":[
         {"listen":"127.0.0.1","port":address.port(),"protocol":"vless",
          "settings":{"clients":[{"id":USER_ID}],"decryption":"none"},"streamSettings":case.stream_settings()},
         socks_inbound(readiness)
-    ],"outbounds":[{"protocol":"freedom","settings":{}}]})
+    ],"outbounds":[{"protocol":"freedom","settings":{
+        // The VLESS inbound enables Go's private-target freedom default.
+        // Open exactly the owned transformer endpoint, as interop.rs does;
+        // default denial itself is covered by dedicated core tests.
+        "finalRules":[{"action":"allow","network":"tcp","ip":["127.0.0.1/32"],"port":target.port()}]
+    }}]})
 }
 fn go_client_config(case: Case, native: SocketAddr, socks: SocketAddr) -> Value {
     json!({"log":{"loglevel":"debug"},"inbounds":[socks_inbound(socks)],"outbounds":[
@@ -520,7 +530,7 @@ async fn rust_to_go(case: Case, binary: &Path, fixture: &mut Fixture) -> Result<
     let remote = transport_port.address()?;
     let ready_port = StdTcpListener::bind(loopback())?;
     let ready = ready_port.local_addr()?;
-    let config = go_server_config(case, remote, ready);
+    let config = go_server_config(case, remote, ready, target);
     // Go cannot inherit portable listener handles; release reservations only
     // immediately before spawn. Any collision fails startup with captured logs.
     drop(transport_port);

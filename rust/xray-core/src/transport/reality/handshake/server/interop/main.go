@@ -6,7 +6,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -97,10 +98,14 @@ func runTarget() error {
 	} else if os.Args[2] != "hybrid" {
 		return fmt.Errorf("invalid group")
 	}
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	// ECDSA P-256 matches what browser-fingerprint clients advertise. An
+	// Ed25519 target would be rejected by Go's standard server before any
+	// flight because the uTLS "chrome" signature list has no Ed25519.
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
 	}
+	public := &private.PublicKey
 	certificate := &x509.Certificate{
 		SerialNumber: big.NewInt(1), DNSNames: []string{"example.test"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),

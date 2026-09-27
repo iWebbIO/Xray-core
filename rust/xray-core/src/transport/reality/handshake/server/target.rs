@@ -24,7 +24,7 @@ use super::{
 /// protocol dispatcher. Counts include all bytes consumed during classification.
 pub enum TargetOutcome {
     Authenticated {
-        stream: ClientStream,
+        stream: Box<ClientStream>,
         info: ServerConnectionInfo,
     },
     Forwarded {
@@ -94,7 +94,10 @@ pub async fn accept_with_target(
     })?;
     drop(connection.target);
     let (stream, info) = result?;
-    Ok(TargetOutcome::Authenticated { stream, info })
+    Ok(TargetOutcome::Authenticated {
+        stream: Box::new(stream),
+        info,
+    })
 }
 
 struct TargetConnection {

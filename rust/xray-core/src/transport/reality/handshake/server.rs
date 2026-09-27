@@ -219,13 +219,13 @@ fn prepare(
     target: Option<&target::TargetFlight>,
 ) -> io::Result<PreparedHandshake> {
     let admitted = authenticate_client_hello(
-        &client_hello,
+        client_hello,
         &config.private_key,
         &config.policy,
         SystemTime::now(),
     )
     .map_err(|e| invalid(e.to_string()))?;
-    let offer = hello::Offer::parse(&client_hello)?;
+    let offer = hello::Offer::parse(client_hello)?;
     let selected = match target {
         Some(target) => offer.select_target(config, target.suite, target.group)?,
         None => offer.select(config)?,
@@ -251,7 +251,7 @@ fn prepare(
         }
     };
     let mut transcript = Transcript::new(selected.suite);
-    transcript.update(&client_hello);
+    transcript.update(client_hello);
     transcript.update(&server_hello);
     let secrets = HandshakeSecrets::new(selected.suite, &shared, &transcript.hash())?;
     drop(shared);
