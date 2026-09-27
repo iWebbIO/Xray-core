@@ -62,12 +62,46 @@ Current follow-up assignments reuse the existing workers:
 - Protobuf: strict native decoder and CLI byte loader delivered; tests pending.
 - Audit: refresh current feature evidence and remaining whole-project gaps.
 
-The latest broad library checkpoint ran 679 tests: 672 passed, three failed and
-four external-reference tests were ignored. The three failures were assigned to
-the KCP/XDRIVE owners and are not waived. Compiled runtime test suites separately
-passed 8 gRPC, 5 KCP, 6 accounting and 18 proxy cases. Subsequent source changes
-still require rebuilding; these counts are not a claim that the current tree is
-fully validated.
+## Checkpoint — September 27, 2026 (after upstream merge 71e232c1)
+
+The upstream merge added the Go MASQUE outbound/transport (RFC 9484 CONNECT-IP,
+~6.6k lines), an HTTP/2 MASQUE mode, a FakeDNS IPv6 pool default change, geodata
+regex prefiltering, and WireGuard packet-view releases. No Rust code referenced
+the removed/renumbered `wireguard`/`udphop` proto fields, and `xray-proto`
+regenerates bindings from the merged `.proto` set automatically; a native Rust
+MASQUE implementation is a new backlog item, not started.
+
+Executed on the merged tree (Windows x86-64, Go 1.27 reference rebuilt from
+source at commit 71e232c1):
+
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`: both clean after fixing 48 lints raised by the
+  newer 1.96 toolchain (let-underscore futures, is_multiple_of, needless
+  borrows, collapsible ifs, boxed a large REALITY enum variant, and context
+  structs replacing two 8-argument runtime functions).
+- `cargo test --workspace --locked --no-fail-fast`: **885 passed, 0 failed,
+  5 ignored** (the ignored are the env-gated Go-fixture tests). The previously
+  assigned failures are resolved: the KCP linger test now probes the wildcard
+  bind form (Winsock permits specific-over-wildcard binds), and the DNS
+  TCP/UDP fixture reserves via the UDP allocator to avoid Windows excluded
+  port ranges.
+- Real-reference interoperability with `XRAY_GO_BINARY=target/reference-xray.exe`
+  (rebuilt from the merged source): `interop` 34/34, `transport_interop` 6/6,
+  `xhttp_modes` 8/8. The KCP and gRPC-tun Rust→Go cases pass after granting the
+  Go server the same scoped echo-port freedom `finalRules` allow that interop.rs
+  already used; the Go freedom private-target default was blackholing them.
+- All five env-gated Go-fixture tests pass against fixtures rebuilt from the
+  merged source: SS2022 both directions/ciphers, XDRIVE local both directions,
+  REALITY Go-server direction, and both REALITY native-server directions.
+  Two parity repairs landed: the native REALITY server no longer requires
+  Ed25519 (0x0807) in the client signature list (the pinned Go fork forces
+  Ed25519 for its synthetic certificate and never consults that list), and the
+  Go target fixture now serves an ECDSA P-256 certificate because browser
+  fingerprints do not advertise Ed25519 and Go's standard server rejects that
+  pairing before sending any flight.
+- CI: `rust.yml` gained an `interop` job that builds the Go reference from
+  `go.mod`-pinned toolchain and runs the three interop targets with
+  `XRAY_GO_BINARY`, closing the audit's missing-external-evidence gap on Linux.
 
 Validation checkpoints are recorded in notes/PARITY_AUDIT.md. The entire project
 conversion remains active; Go sources and Go release workflows are preserved.

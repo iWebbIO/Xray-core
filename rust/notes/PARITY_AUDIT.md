@@ -1,9 +1,9 @@
 # Source-to-Rust parity audit
 
-Audit snapshot: **September 19, 2026**. Go reference commit:
-`dcdfc57ccdad496e192344788a7d14a8d4c88573` (Xray 26.9.9). The Rust tree is an
-uncommitted, actively changing migration. This inventory was refreshed against
-configuration, CLI and runtime code on September 19, 2026. Dated test checkpoints
+Audit snapshot: **September 19, 2026**, refreshed **September 27, 2026** after the
+upstream merge `71e232c1`. Go reference rebuilt from the merged source (Xray
+26.9.9 plus MASQUE, FakeDNS pool, geodata regex prefilter and WireGuard updates).
+The Rust tree is an actively changing migration. Dated test checkpoints
 describe their tested snapshots; subsequent code is not covered automatically.
 
 **Full feature parity has not been achieved.** Native TCP proxy paths and the
@@ -11,7 +11,36 @@ reported cross-language exchanges below work within their tested scope.
 Generated schemas, standalone libraries and newly connected runtime hooks are
 not substitutes for complete configuration integration or interoperability.
 
-## Current validation boundary — September 19, 2026
+## Current validation boundary — September 27, 2026 (merged tree)
+
+Executed by the migration lead on Windows x86-64 against the merged Go source
+(`71e232c1`) with the Go reference and all four Go test fixtures rebuilt from
+that source:
+
+| Executed target / checkpoint | Reported result | Limit of the evidence |
+| --- | --- | --- |
+| `cargo fmt` / `cargo clippy -D warnings` / `cargo test --workspace --locked --no-fail-fast` | **fmt clean, clippy clean, 885 passed / 0 failed / 5 ignored** | The five ignored are the env-gated Go-fixture tests, executed separately below. A green workspace is not feature parity; see inventory rows. |
+| `interop` with rebuilt `XRAY_GO_BINARY` | **34 passed, 0 skipped** | Real-process bidirectional coverage for SOCKS/HTTP/VLESS/Trojan/legacy-SS/VMess/TLS/XHTTP modes; unchanged scope caveats below still apply. |
+| `transport_interop` with rebuilt reference | **6 passed** | KCP and gRPC-tun Rust→Go exchanges now execute after granting the Go server the same scoped echo-port `finalRules` allow `interop.rs` uses; Go→Rust uses the in-test native server, not the Rust binary. |
+| `xhttp_modes` with rebuilt reference | **8 passed** | XHTTP mode matrix including H1 streaming/stream-one over TLS and non-TLS against the Go reference. |
+| SS2022 / XDRIVE / REALITY Go-fixture tests (`--ignored`, env-gated) | **5 passed** | REALITY native server accepts the pinned Go uTLS client in both plain and target-mirroring modes after two repairs: the server no longer requires Ed25519 (0x0807) in the client signature list (the pinned Go fork forces Ed25519 for its synthetic certificate and never consults that list), and the Go target fixture serves ECDSA P-256 because browser fingerprints do not advertise Ed25519 and Go's standard server rejects that pairing pre-flight. |
+
+Two earlier assigned workspace failures are fixed deterministically: the KCP
+linger test now proves the held port with a wildcard re-bind (Winsock permits a
+specific-address bind over another socket's wildcard bind), and the DNS dual
+protocol fixture picks its port through the UDP allocator (Windows TCP-selected
+ephemeral ports can fall wholly inside UDP-excluded ranges). CI gained an
+`interop` job (Go reference built in-job, all three interop targets serially);
+a declared job is not a completed run until it executes on GitHub.
+
+The upstream merge added the Go MASQUE family (`proxy/masque`,
+`transport/internet/masque`, ~6.6k lines, RFC 9484 CONNECT-IP with HTTP/2 and
+HTTP/3 modes). `xray-proto` regenerates bindings for the new protos
+automatically; **no native Rust MASQUE implementation exists yet** and the
+proxy/transport inventory below does not include it. `loopback` likewise
+remains absent.
+
+## Prior validation boundary — September 19, 2026
 
 The migration lead supplied these executed results for this refresh. This
 documentation worker did not run builds or integration tests:
