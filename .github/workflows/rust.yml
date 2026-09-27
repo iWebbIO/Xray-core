@@ -22,3 +22,18 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # Cross-language evidence: without a real Go reference executable the
+  # interop targets self-skip and provide no interoperability proof.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - run: go build -o target/reference-xray ./main
+      - run: cargo test -p xray --locked --test interop --test transport_interop --test xhttp_modes -- --test-threads=1
+        env:
+          XRAY_GO_BINARY: ${{ github.workspace }}/target/reference-xray
