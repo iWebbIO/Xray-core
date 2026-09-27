@@ -13,6 +13,7 @@ fn hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
+#[allow(clippy::type_complexity)] // test wiring pair
 fn fixture() -> (
     mpsc::Sender<Vec<u8>>,
     mpsc::Receiver<Vec<u8>>,
