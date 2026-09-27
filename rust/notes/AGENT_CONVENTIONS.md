@@ -155,3 +155,76 @@ Your FINAL message must be exactly one JSON object (no prose around it):
 Aim to finish within roughly 20–25 minutes of tool work. Prioritize a correct,
 tested core that compiles over exhaustively porting every option. List anything
 unported in `notes`. Do not start follow-on work outside your owned files.
+
+---
+
+## Wiring batch annex (September 28, 2026)
+
+The wiring batch integrates the 15 delivered components into the root
+config/runtime. Phase 0 (commit 77a47812) landed the skeleton: final enum
+shapes, root config keys, masque/REALITY stream settings, and seven runtime
+satellite stubs whose doc comments are binding contracts. Every unwired path
+currently fails explicitly; your job is to replace exactly one stub region
+with the real implementation and keep all gates green.
+
+### Ownership (strict, one agent per file set)
+
+| Agent | Files |
+|---|---|
+| A-VLESS | protocol/vless.rs, protocol/vless_encryption.rs, protocol/vless_vision.rs |
+| A-UDP | protocol/trojan.rs, protocol/trojan_udp.rs, protocol/ss2022_udp.rs, runtime/trojan_udp_runtime.rs, runtime/ss2022_udp_runtime.rs |
+| A-WG | runtime/wireguard_runtime.rs (+ protocol/wireguard_netstack.rs additions only if a real-socket transport is missing) |
+| A-REV | runtime/reverse_runtime.rs, reverse.rs, reverse/bridge.rs, reverse/control.rs, tests/runtime_reverse.rs (new) |
+| A-DNS | runtime/dns_runtime.rs, runtime/admission.rs, runtime/udp_integration.rs (internals), protocol/freedom.rs, dns/app.rs (additions only if needed) |
+| A-HANDLER | runtime/handler_registry.rs, api/handler.rs, api/proxyman.rs |
+| A-YAML | xray/src/config_loader.rs |
+| R-RUNTIME | runtime.rs, runtime/burst_observatory.rs |
+| R-TRANSPORT | transport.rs |
+
+Nobody edits another agent's files. config.rs, config/proxies.rs and the
+other Phase-0 regions are frozen; if a contract there is wrong, report it in
+your JSON instead of editing.
+
+### Cross-agent contracts (in addition to the stub doc comments)
+
+1. `admission::admit` final signature (A-DNS owns the file, R-RUNTIME owns
+   the runtime.rs call site):
+   `pub(super) async fn admit(outbound: &Outbound, origin: &str, target: &Destination, dns: Option<&std::sync::Arc<crate::dns::app::DnsApp>>) -> Result<Admission>`.
+   R-RUNTIME passes `dispatcher.dns.as_ref()` and removes the temporary
+   `strategy != AsIs` bail in `establish`, routing resolution through
+   admission (Go: UseIP falls back to domain dial, ForceIP errors, the
+   ip46 pairs try both families in order — mirror proxy/freedom/freedom.go).
+2. `establish` gains the WireGuard pool (R-RUNTIME owns the signature):
+   `establish(outbound, transport, target, resolved, counters, wireguard: &wireguard_runtime::WireguardPool)`
+   with the dispatcher passing `&dispatcher.wireguard`; the Wireguard bail
+   is replaced by `wireguard.connect(dispatcher, settings, target).await`.
+   A-WG keeps `WireguardPool::connect` compatible with this call.
+3. `dispatch_request` (R-RUNTIME extracts from handle_stream's post-handshake
+   half, A-REV consumes via `super::`):
+   a child-visible async fn taking the established inbound request (stream,
+   `protocol::Request`, source, inbound tag, dispatcher, cancel) performing
+   route → establish → relay with the runtime's accounting/logging. The
+   reverse bridge pumps portal-requested sessions through it.
+4. Portal dispatch (A-REV exposes the stub API; R-RUNTIME wires the sites):
+   portal tags are registered as routing outbounds (Router::compile outbound
+   list and `dispatcher.outbound_tags`) and dispatching to them opens a
+   portal session; inbound requests whose destination is a bridge domain are
+   handed to `attach_carrier`. A-REV verifies against Go whether this is
+   built-in or routing-rule driven and reports the finding.
+5. UDP dispatch: `dispatcher.udp` is installed for any SOCKS/Trojan/SS2022
+   inbound with UDP enabled (done in Phase 0); the trojan and SS2022 runtimes
+   reuse `udp::UdpDispatcher` exactly like `runtime/udp_integration.rs` does.
+6. The MASQUE proxy outbound bypasses `establish` (its `process_tcp` owns the
+   relay) and dials through `transport::masque::MasqueClient` per its module
+   docs; the generic masque *transport* (other proxies over masque) is
+   R-TRANSPORT's `connect_resolved` arm.
+
+### Same rules as the package batch
+
+Commands: `cargo check -p xray-core --lib` (or `cargo test -p xray-core
+--lib <filter>`), at most 3 invocations per run, rerun once if a sibling's
+file broke your check. Final self-check: `cargo fmt --all` on your files,
+`cargo clippy -p xray-core --all-targets -- -D warnings`, `cargo test -p
+xray-core --lib` plus any integration test you added. Never run git. Report
+as a JSON object: `{"files": [...], "status": "done"|"blocked", "tests":
+{"added": N, "passing": true|false}, "notes": "...", "blocked_checks": "..."}`.
