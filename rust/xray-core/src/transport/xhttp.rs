@@ -2369,6 +2369,8 @@ mod tests {
     }
 }
 
+pub mod download;
 pub mod http2;
+pub mod xmux;
 #[cfg(test)]
 mod streaming_tests;

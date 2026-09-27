@@ -4,6 +4,7 @@
 //! transport, configuration conversion, and UDP socket ownership belong to the
 //! caller. The Go mask manager's maximum UDP wire packet is 4096 bytes.
 
+pub mod chain;
 pub mod custom;
 pub mod fragment;
 pub mod noise;

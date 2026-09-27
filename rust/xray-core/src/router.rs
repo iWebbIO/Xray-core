@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 pub mod balancer;
+pub mod balancer_strategies;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};

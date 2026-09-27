@@ -11,11 +11,13 @@ use crate::{
 };
 
 pub mod dns;
+pub mod legacy;
 pub mod observatory;
 pub mod protobuf;
 mod proxies;
 mod reality;
 mod vmess;
+pub mod yaml_compat;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

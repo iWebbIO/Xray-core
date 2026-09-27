@@ -4,6 +4,7 @@
 //! This module does not bypass the enclosing proxy's authentication/routing.
 //! The dispatcher explicitly receives each accepted target and its metadata.
 
+pub mod session;
 pub mod wire;
 pub mod xudp;
 

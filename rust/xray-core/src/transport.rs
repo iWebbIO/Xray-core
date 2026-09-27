@@ -1,12 +1,21 @@
 //! Composable asynchronous byte streams shared by proxies and transports.
+pub mod browser_dialer;
 pub mod finalmask;
 pub mod grpc;
+pub mod headers;
 pub mod httpupgrade;
 pub mod hysteria;
+pub mod hysteria_endpoint;
 pub mod kcp;
+pub mod masque;
+pub mod masque_connectip;
 pub mod proxy_protocol;
+pub mod proxy_protocol_runtime;
 pub mod reality;
+pub mod reality_inbound;
+pub mod sockopt;
 pub mod tls;
+pub mod unix_listener;
 pub mod websocket;
 pub mod xdrive;
 pub mod xhttp;

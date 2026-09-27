@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 mod accounting;
 mod admission;
+mod dialer_proxy;
 mod observatory;
+mod sniffing;
 pub mod udp;
 mod udp_integration;
 pub mod udp_routing;

@@ -7,6 +7,7 @@
 
 pub mod api;
 mod certificate;
+mod convert;
 mod ech;
 mod ping;
 mod post_quantum;

@@ -4,7 +4,9 @@
 //! It does not implement encrypted DNS, FakeDNS, geodata server selection, or
 //! Xray's dispatcher integration. See `rust/notes/DNS.md` for integration limits.
 
+pub mod app;
 mod cache;
+pub mod fakedns;
 pub mod network;
 mod resolver;
 mod service;

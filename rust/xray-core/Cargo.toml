@@ -41,6 +41,7 @@ rustls-pemfile.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+socket2.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 sha3.workspace = true
@@ -64,7 +65,7 @@ rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
-default = []
+default = ["native-tun"]
 native-tun = ["dep:tun-rs", "dep:netstack-smoltcp", "dep:futures-util"]
 
 [lints]

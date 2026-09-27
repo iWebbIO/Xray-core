@@ -4,6 +4,7 @@
 //! outbound requests through Portal::open, and supplies the bridge connector
 //! and dispatcher. No global route/outbound configuration is changed here.
 
+pub mod bridge;
 pub mod control;
 
 use crate::{

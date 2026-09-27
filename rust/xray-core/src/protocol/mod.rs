@@ -1,19 +1,31 @@
+pub mod dokodemo_udp;
 pub mod freedom;
+pub mod freedom_dialer;
 pub mod http;
+pub mod http_inbound;
 pub mod hysteria;
+pub mod hysteria_runtime;
+pub mod loopback;
+pub mod masque;
 pub mod outbound;
 pub mod shadowsocks;
 pub mod shadowsocks2022;
 pub mod shadowsocks_session;
 pub mod shadowsocks_udp;
 pub mod socks;
+pub mod ss2022_udp;
 pub mod trojan;
+pub mod trojan_udp;
 pub mod tun;
+pub mod tun_runtime;
 pub mod udp;
 pub mod vless;
+pub mod vless_encryption;
 pub mod vless_security;
+pub mod vless_vision;
 pub mod vmess;
 pub mod wireguard;
+pub mod wireguard_netstack;
 
 use crate::address::Destination;
 

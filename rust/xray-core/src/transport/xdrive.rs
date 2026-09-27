@@ -9,6 +9,7 @@
 mod connection;
 mod session;
 mod storage;
+pub mod stream;
 pub mod template;
 mod wal;
 pub mod wire;

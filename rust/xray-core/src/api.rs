@@ -8,8 +8,11 @@
 //! Runtime accounting must share the same [`crate::features::StatsManager`].
 //! Listening does not enable counters or user-online tracking by itself.
 
+pub mod handler;
 pub mod logger;
 pub mod observatory;
+pub mod proxyman;
+pub mod routing;
 mod server;
 mod stats;
 mod system;

@@ -4,6 +4,7 @@
 //! `flush` confirms acknowledgement of all preceding writes. This is Xray's
 //! bespoke KCP format, not stock ikcp. TLS may be composed around the returned
 //! stream separately; this module explicitly rejects unimplemented wrappers.
+pub mod headers;
 pub mod session;
 pub mod wire;
 pub use session::{Config, Session, State};

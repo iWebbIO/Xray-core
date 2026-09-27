@@ -9,6 +9,7 @@
 //! are never heuristically converted. Unknown configuration fields are retained
 //! for the downstream validator, including fields outside today's Rust models.
 
+mod remote;
 use std::{
     ffi::OsString,
     fs,

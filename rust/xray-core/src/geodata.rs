@@ -8,6 +8,7 @@
 
 mod matcher;
 mod registry;
+pub mod update;
 
 pub use matcher::{DomainMatcher, IpMatcher};
 pub use registry::{DynamicDomainMatcher, DynamicIpMatcher, GeoDataRegistry};
