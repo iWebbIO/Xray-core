@@ -62,6 +62,35 @@ Current follow-up assignments reuse the existing workers:
 - Protobuf: strict native decoder and CLI byte loader delivered; tests pending.
 - Audit: refresh current feature evidence and remaining whole-project gaps.
 
+## Checkpoint — September 27, 2026, parallel batch (commit 421a7630)
+
+A 15-agent parallel batch (strict per-file ownership, shared conventions in
+notes/AGENT_CONVENTIONS.md) ported fifteen previously-missing subsystems as
+tested components, followed by central integration. Delivered:
+
+MASQUE stack (capsule codec + HTTP/2 extended-CONNECT transport + proxy
+session), VLESS encryption wire session, XTLS Vision stream adapter, Trojan
+UDP frames, multi-user Shadowsocks-2022 UDP, WireGuard userspace netstack
+(smoltcp TCP + UDP over the existing Noise engine), Mux.Cool session
+scheduling, reverse bridge/portal, burst observatory, DNS app composition,
+HandlerService management API, and Go-verified YAML-1.1/env compat.
+
+Each package ships focused loopback tests (135 new tests total). Integration
+repairs: the SS2022 UDP AEAD open double-stripped the GCM tag; the MASQUE
+client raced ahead of the server's HTTP/2 SETTINGS before the extended-CONNECT
+check; the Vision reader awaited bytes forever after a decoder poisoning; the
+WireGuard loopback test wire fed each side its own sends; TCP shutdown waited
+for the peer's FIN instead of the local one; the REALITY inbound default for
+absent maxTimeDiff stayed zero (disabled) like Go; Go's /0 range-to-prefix
+case was fixed in host-mask computation.
+
+Executed: fmt clean, clippy `-D warnings` clean, `cargo test --workspace
+--locked` **1020 passed / 0 failed / 5 ignored** (the five env-gated Go
+fixtures all verified passing), Go-reference interop unchanged (34/6/8).
+These are components with `from_value`/runtime-hook contracts; root
+config/runtime wiring for the new selectors is the next milestone, and the
+Go MASQUE HTTP/3 branch remains explicitly rejected.
+
 ## Checkpoint — September 27, 2026 (after upstream merge 71e232c1)
 
 The upstream merge added the Go MASQUE outbound/transport (RFC 9484 CONNECT-IP,

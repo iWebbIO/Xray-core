@@ -36,9 +36,27 @@ a declared job is not a completed run until it executes on GitHub.
 The upstream merge added the Go MASQUE family (`proxy/masque`,
 `transport/internet/masque`, ~6.6k lines, RFC 9484 CONNECT-IP with HTTP/2 and
 HTTP/3 modes). `xray-proto` regenerates bindings for the new protos
-automatically; **no native Rust MASQUE implementation exists yet** and the
-proxy/transport inventory below does not include it. `loopback` likewise
-remains absent.
+automatically. **Native MASQUE components now exist** (capsule codec with
+Go/IANA type numbers, HTTP/2 extended-CONNECT transport, proxy session over a
+`ConnectIpSession` trait; 24 transport + 14 codec + 10 proxy tests) — as
+components with integration contracts, not yet wired into root config. The
+MASQUE HTTP/3 branch is explicitly rejected with a named error.
+
+### Parallel batch — September 27, 2026 (commit 421a7630)
+
+Fifteen subsystem packages ported by a 15-agent batch with strict file
+ownership: MASQUE (proxy/transport/capsules), VLESS encryption session, XTLS
+Vision adapter, Trojan UDP, SS2022 multi-user UDP, WireGuard userspace
+netstack (smoltcp), Mux.Cool session scheduling, reverse bridge/portal, burst
+observatory, DNS app composition, HandlerService management API, YAML-1.1
+scalar/env compat. All are components awaiting root config/runtime wiring;
+until then the corresponding selectors remain rejected by the strict config
+layer. Workspace evidence: **fmt/clippy clean, 1020 passed / 0 failed / 5
+ignored** (+135 tests), Go-reference interop unchanged (34/6/8). Inventory
+rows below still describe their pre-batch boundaries where the runtime layer
+is concerned; the component columns for MASQUE, `loopback`-style detours,
+Vision/encryption, UDP families, mux scheduling, reverse, burst observatory
+and DNS app composition now have native tested implementations.
 
 ## Prior validation boundary — September 19, 2026
 
