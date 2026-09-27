@@ -27,6 +27,14 @@ pub struct Config {
     pub stats: Option<StatsConfig>,
     pub api: Option<ApiConfig>,
     pub observatory: Option<observatory::ObservatoryConfig>,
+    /// Raw `dns` app object; compiled by `dns::app::DnsApp::from_value`.
+    pub dns: Option<Value>,
+    /// Raw `reverse` app object; compiled by `reverse::ReverseConfig::from_value`.
+    pub reverse: Option<Value>,
+    /// Raw `burstObservatory` object; compiled by
+    /// `features::observatory_burst::BurstObservatoryConfig::from_value`.
+    #[serde(rename = "burstObservatory")]
+    pub burst_observatory: Option<Value>,
     pub inbounds: Vec<InboundConfig>,
     pub outbounds: Vec<OutboundConfig>,
     pub routing: RoutingConfig,
@@ -54,7 +62,7 @@ impl ApiConfig {
             ensure!(
                 matches!(
                     service.as_str(),
-                    "statsservice" | "loggerservice" | "observatoryservice"
+                    "statsservice" | "loggerservice" | "observatoryservice" | "handlerservice"
                 ),
                 "API service {service:?} is not integrated yet"
             );
@@ -105,6 +113,7 @@ pub struct StreamSettings {
     pub httpupgrade_settings: Option<Value>,
     pub grpc_settings: Option<Value>,
     pub kcp_settings: Option<Value>,
+    pub masque_settings: Option<Value>,
 }
 
 impl StreamSettings {
@@ -122,6 +131,7 @@ impl StreamSettings {
                     | "grpc"
                     | "kcp"
                     | "mkcp"
+                    | "masque"
             ),
             "transport {:?} is not migrated yet",
             self.network
@@ -152,8 +162,16 @@ impl StreamSettings {
             "kcpSettings requires the KCP transport"
         );
         ensure!(
+            self.masque_settings.is_none() || self.network == "masque",
+            "masqueSettings requires the masque transport"
+        );
+        ensure!(
             !matches!(self.network.as_str(), "kcp" | "mkcp") || self.security != "reality",
             "KCP does not support REALITY security"
+        );
+        ensure!(
+            self.network != "masque" || self.security == "tls",
+            "the masque transport requires \"security\": \"tls\""
         );
         Ok(())
     }
@@ -180,13 +198,13 @@ impl StreamSettings {
             let mut settings: crate::transport::tls::TlsSettings =
                 serde_json::from_value(self.tls_settings.clone().unwrap_or_else(empty_object))
                     .context("invalid TLS settings")?;
-            if self.network == "grpc" {
+            if self.network == "grpc" || self.network == "masque" {
                 if settings.alpn.is_empty() {
                     settings.alpn.push("h2".into());
                 }
                 ensure!(
                     settings.alpn.iter().all(|protocol| protocol == "h2"),
-                    "gRPC TLS requires h2-only ALPN"
+                    "gRPC/MASQUE TLS requires h2-only ALPN"
                 );
             } else if xhttp.is_some()
                 || matches!(self.network.as_str(), "ws" | "websocket" | "httpupgrade")
@@ -212,16 +230,25 @@ impl StreamSettings {
     }
 
     pub(crate) fn inbound_transport(&self) -> Result<crate::transport::InboundTransport> {
-        ensure!(
-            self.security != "reality",
-            "REALITY inbound transport is not migrated yet"
-        );
         let (tls, xhttp) = self.layers()?;
+        // REALITY replaces the TLS layer: the inbound parser enforces every
+        // Go constraint on `realitySettings` (dest, serverNames, privateKey,
+        // shortIds, xver, version bounds).
+        let reality = if self.security == "reality" {
+            let value = self
+                .reality_settings
+                .as_ref()
+                .context("REALITY inbound requires realitySettings")?;
+            Some(crate::transport::reality_inbound::InboundConfig::from_value(value)?)
+        } else {
+            None
+        };
         Ok(crate::transport::InboundTransport {
             tls: tls
                 .as_ref()
                 .map(crate::transport::tls::TlsServer::new)
                 .transpose()?,
+            reality,
             xhttp: xhttp.map(crate::transport::xhttp::Server::new),
             websocket: self.websocket()?,
             httpupgrade: self.httpupgrade()?,
@@ -247,6 +274,13 @@ impl StreamSettings {
         } else {
             None
         };
+        let masque = if self.network == "masque" {
+            Some(crate::transport::masque::Settings::from_value(
+                self.masque_settings.as_ref().unwrap_or(&empty_object()),
+            )?)
+        } else {
+            None
+        };
         Ok(crate::transport::OutboundTransport {
             tls: tls
                 .as_ref()
@@ -262,6 +296,12 @@ impl StreamSettings {
                         .unwrap_or_default()
                 }),
             reality,
+            masque,
+            masque_tls: if self.network == "masque" {
+                tls.clone()
+            } else {
+                None
+            },
             xhttp,
             websocket: self.websocket()?,
             httpupgrade: self.httpupgrade()?,
@@ -385,10 +425,26 @@ pub enum Inbound {
     Socks(SocksSettings),
     Http(HttpSettings),
     Dokodemo(Destination),
-    Vless(Vec<crate::protocol::vless::Account>),
-    Trojan(Vec<crate::protocol::trojan::Account>),
+    Vless {
+        accounts: Vec<crate::protocol::vless::Account>,
+        /// Inbound `decryption`: `none` keeps the plaintext header exchange,
+        /// `mlkem768x25519plus` wraps the whole VLESS session in the shared
+        /// encrypted session (replay history must span connections).
+        decryption: Option<std::sync::Arc<crate::protocol::vless_encryption::ServerDecryption>>,
+    },
+    Trojan {
+        accounts: Vec<crate::protocol::trojan::Account>,
+        /// Trojan's protocol has no network gate: command 3 (UDP over the
+        /// Trojan connection) is always available.
+        udp: bool,
+    },
     Shadowsocks(crate::protocol::shadowsocks_session::Account),
-    Shadowsocks2022(crate::protocol::shadowsocks2022::Account),
+    Shadowsocks2022 {
+        account: crate::protocol::shadowsocks2022::Account,
+        /// `network: "tcp,udp"` opts into the 2022 UDP listener; the absent
+        /// field means TCP only, exactly like Go's nil NetworkList.
+        udp: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -408,6 +464,9 @@ pub enum Outbound {
         account: crate::protocol::shadowsocks2022::Account,
     },
     Freedom {
+        /// `domainStrategy`/`targetStrategy`; non-AsIs values resolve through
+        /// the configured DNS app (or the system resolver when absent).
+        strategy: crate::protocol::freedom::DomainStrategy,
         redirect: Option<Destination>,
         final_rules: crate::protocol::freedom::FinalRules,
     },
@@ -425,15 +484,28 @@ pub enum Outbound {
     Vless {
         server: Destination,
         account: crate::protocol::vless::Account,
+        /// Outbound account `encryption`: `none` is the plaintext session and
+        /// `mlkem768x25519plus` the hybrid encrypted session.
+        encryption: Option<std::sync::Arc<crate::protocol::vless_encryption::ClientEncryption>>,
     },
     Trojan {
         server: Destination,
         account: crate::protocol::trojan::Account,
     },
+    Masque {
+        settings: crate::protocol::masque::Settings,
+        server: Destination,
+    },
+    Wireguard {
+        settings: crate::protocol::wireguard::WireGuardConfig,
+    },
 }
 
 pub(crate) struct ValidatedConfig {
     pub observatory: Option<observatory::CompiledObservatory>,
+    pub burst: Option<crate::features::observatory_burst::BurstSettings>,
+    pub dns: Option<std::sync::Arc<crate::dns::app::DnsApp>>,
+    pub reverse: Option<crate::reverse::bridge::ReverseConfig>,
     pub inbounds: Vec<(InboundConfig, Inbound, crate::transport::InboundTransport)>,
     pub outbounds: Vec<Outbound>,
     pub outbound_transports: Vec<crate::transport::OutboundTransport>,
@@ -483,8 +555,9 @@ impl Config {
                 !api.services
                     .iter()
                     .any(|service| service.eq_ignore_ascii_case("ObservatoryService"))
-                    || self.observatory.is_some(),
-                "ObservatoryService requires configured ordinary observatory"
+                    || self.observatory.is_some()
+                    || self.burst_observatory.is_some(),
+                "ObservatoryService requires a configured observatory or burstObservatory"
             );
         }
         let observatory = self
@@ -492,6 +565,25 @@ impl Config {
             .as_ref()
             .map(observatory::ObservatoryConfig::compile)
             .transpose()?;
+        let burst = match &self.burst_observatory {
+            Some(value) => Some(
+                crate::features::observatory_burst::BurstObservatoryConfig::from_value(value)?
+                    .build()?,
+            ),
+            None => None,
+        };
+        // The DNS app is built eagerly so `xray run --test` reports server,
+        // hosts and strategy errors before any listener opens.
+        let dns = self
+            .dns
+            .as_ref()
+            .map(crate::dns::app::DnsApp::from_value)
+            .transpose()?
+            .map(std::sync::Arc::new);
+        let reverse = match &self.reverse {
+            Some(value) => Some(crate::reverse::bridge::ReverseConfig::from_value(value)?),
+            None => None,
+        };
         let mut inbound_tags = HashSet::new();
         let mut inbounds = Vec::new();
         for raw in &self.inbounds {
@@ -500,95 +592,8 @@ impl Config {
                 "duplicate inbound tag {:?}",
                 raw.tag
             );
-            let transport = raw
-                .stream_settings
-                .inbound_transport()
-                .with_context(|| format!("inbound {:?}", raw.tag))?;
-            let inbound = match raw.protocol.as_str() {
-                "socks" => {
-                    let mut settings: SocksSettings = serde_json::from_value(raw.settings.clone())
-                        .context("SOCKS inbound settings")?;
-                    ensure!(
-                        matches!(settings.auth.as_str(), "" | "noauth" | "password"),
-                        "unknown SOCKS authentication method"
-                    );
-                    ensure!(
-                        settings.user_level == 0,
-                        "user policy levels are not migrated yet"
-                    );
-                    if !settings.accounts.is_empty() {
-                        settings.users = None;
-                    }
-                    if let Some(users) = settings.users.take() {
-                        settings.accounts = users;
-                    }
-                    if settings.auth == "password" {
-                        ensure!(
-                            !settings.accounts.is_empty(),
-                            "SOCKS password authentication requires accounts"
-                        );
-                        for account in &settings.accounts {
-                            ensure!(
-                                (1..=255).contains(&account.user.len())
-                                    && (1..=255).contains(&account.pass.len()),
-                                "SOCKS credentials must contain 1..255 bytes"
-                            );
-                        }
-                    }
-                    Inbound::Socks(settings)
-                }
-                "http" => {
-                    let mut settings: HttpSettings = serde_json::from_value(raw.settings.clone())
-                        .context("HTTP inbound settings")?;
-                    ensure!(
-                        settings.user_level == 0,
-                        "user policy levels are not migrated yet"
-                    );
-                    ensure!(
-                        !settings.allow_transparent,
-                        "transparent HTTP is not migrated yet"
-                    );
-                    if !settings.accounts.is_empty() {
-                        settings.users = None;
-                    }
-                    if let Some(users) = settings.users.take() {
-                        settings.accounts = users;
-                    }
-                    Inbound::Http(settings)
-                }
-                "dokodemo-door" => {
-                    let settings: DokodemoSettings = serde_json::from_value(raw.settings.clone())
-                        .context("dokodemo settings")?;
-                    ensure!(
-                        !settings.follow_redirect,
-                        "transparent socket redirection is not migrated yet"
-                    );
-                    ensure!(
-                        settings.user_level == 0,
-                        "user policy levels are not migrated yet"
-                    );
-                    let network = settings
-                        .network
-                        .or(settings.allowed_network)
-                        .unwrap_or_else(|| "tcp".to_owned());
-                    ensure!(network == "tcp", "dokodemo UDP is not migrated yet");
-                    let host = settings
-                        .address
-                        .or(settings.rewrite_address)
-                        .context("dokodemo requires address")?;
-                    let port = if settings.port == 0 {
-                        settings.rewrite_port
-                    } else {
-                        settings.port
-                    };
-                    Inbound::Dokodemo(Destination::new(&host, port)?)
-                }
-                "vless" | "trojan" | "shadowsocks" => {
-                    proxies::inbound(&raw.protocol, &raw.settings)?
-                }
-                "vmess" => vmess::inbound(&raw.settings)?,
-                other => bail!("inbound protocol {other:?} is not migrated yet"),
-            };
+            let (inbound, transport) =
+                compile_inbound(raw).with_context(|| format!("inbound {:?}", raw.tag))?;
             inbounds.push((raw.clone(), inbound, transport));
         }
         ensure!(
@@ -613,9 +618,9 @@ impl Config {
                 "freedom" => {
                     let settings: FreedomSettings = serde_json::from_value(raw.settings.clone()).context("freedom settings")?;
                     let strategy = if settings.target_strategy.is_empty() { &settings.domain_strategy } else { &settings.target_strategy };
-                    ensure!(matches!(strategy.to_ascii_lowercase().as_str(), "" | "asis"), "freedom domain strategy is not migrated yet");
+                    let strategy = crate::protocol::freedom::DomainStrategy::parse(strategy)?;
                     ensure!(settings.user_level == 0, "user policy levels are not migrated yet");
-                    Outbound::Freedom { redirect: if settings.redirect.is_empty() { None } else { Some(Destination::parse_authority(&settings.redirect, None)?) }, final_rules: crate::protocol::freedom::FinalRules::compile(&settings.final_rules)? }
+                    Outbound::Freedom { strategy, redirect: if settings.redirect.is_empty() { None } else { Some(Destination::parse_authority(&settings.redirect, None)?) }, final_rules: crate::protocol::freedom::FinalRules::compile(&settings.final_rules)? }
                 }
                 "blackhole" => {
                     let settings: BlackholeSettings = serde_json::from_value(raw.settings.clone()).context("blackhole settings")?;
@@ -630,6 +635,29 @@ impl Config {
                 }
                 "socks" | "http" | "vless" | "trojan" | "shadowsocks" => proxies::outbound(&raw.protocol, &raw.settings)?,
                 "vmess" => vmess::outbound(&raw.settings)?,
+                "masque" => {
+                    let settings = crate::protocol::masque::Settings::from_value(&raw.settings)
+                        .context("MASQUE outbound settings")?;
+                    // Go's proxy constructor rejects anything but the masque
+                    // transport secured with TLS, at compile time.
+                    crate::protocol::masque::check_stream_settings(
+                        &raw.stream_settings.network,
+                        &raw.stream_settings.security,
+                    )?;
+                    let server = settings.server_destination()?;
+                    Outbound::Masque { settings, server }
+                }
+                "wireguard" => {
+                    let settings: crate::protocol::wireguard::WireGuardConfig =
+                        serde_json::from_value(raw.settings.clone())
+                            .context("WireGuard outbound settings")?;
+                    // Build once here so invalid keys and peers fail before any
+                    // listener opens; the runtime keeps the raw settings value.
+                    settings
+                        .build(crate::protocol::wireguard::Role::Client)
+                        .context("WireGuard outbound settings")?;
+                    Outbound::Wireguard { settings }
+                }
                 other => bail!("outbound protocol {other:?} is not migrated yet"),
             });
         }
@@ -651,12 +679,108 @@ impl Config {
         let router = Router::compile(&self.routing, &routing_outbounds)?;
         Ok(ValidatedConfig {
             observatory,
+            burst,
+            dns,
+            reverse,
             inbounds,
             outbounds,
             outbound_transports,
             router,
         })
     }
+}
+
+/// Compile one inbound: parse its transport settings and protocol accounts.
+/// Shared by `Config::compile` and the HandlerService runtime registry, which
+/// validates dynamically added inbounds through the same rules.
+pub(crate) fn compile_inbound(
+    raw: &InboundConfig,
+) -> Result<(Inbound, crate::transport::InboundTransport)> {
+    let transport = raw.stream_settings.inbound_transport()?;
+    let inbound = match raw.protocol.as_str() {
+        "socks" => {
+            let mut settings: SocksSettings =
+                serde_json::from_value(raw.settings.clone()).context("SOCKS inbound settings")?;
+            ensure!(
+                matches!(settings.auth.as_str(), "" | "noauth" | "password"),
+                "unknown SOCKS authentication method"
+            );
+            ensure!(
+                settings.user_level == 0,
+                "user policy levels are not migrated yet"
+            );
+            if !settings.accounts.is_empty() {
+                settings.users = None;
+            }
+            if let Some(users) = settings.users.take() {
+                settings.accounts = users;
+            }
+            if settings.auth == "password" {
+                ensure!(
+                    !settings.accounts.is_empty(),
+                    "SOCKS password authentication requires accounts"
+                );
+                for account in &settings.accounts {
+                    ensure!(
+                        (1..=255).contains(&account.user.len())
+                            && (1..=255).contains(&account.pass.len()),
+                        "SOCKS credentials must contain 1..255 bytes"
+                    );
+                }
+            }
+            Inbound::Socks(settings)
+        }
+        "http" => {
+            let mut settings: HttpSettings =
+                serde_json::from_value(raw.settings.clone()).context("HTTP inbound settings")?;
+            ensure!(
+                settings.user_level == 0,
+                "user policy levels are not migrated yet"
+            );
+            ensure!(
+                !settings.allow_transparent,
+                "transparent HTTP is not migrated yet"
+            );
+            if !settings.accounts.is_empty() {
+                settings.users = None;
+            }
+            if let Some(users) = settings.users.take() {
+                settings.accounts = users;
+            }
+            Inbound::Http(settings)
+        }
+        "dokodemo-door" => {
+            let settings: DokodemoSettings =
+                serde_json::from_value(raw.settings.clone()).context("dokodemo settings")?;
+            ensure!(
+                !settings.follow_redirect,
+                "transparent socket redirection is not migrated yet"
+            );
+            ensure!(
+                settings.user_level == 0,
+                "user policy levels are not migrated yet"
+            );
+            let network = settings
+                .network
+                .or(settings.allowed_network)
+                .unwrap_or_else(|| "tcp".to_owned());
+            ensure!(network == "tcp", "dokodemo UDP is not migrated yet");
+            let host = settings
+                .address
+                .or(settings.rewrite_address)
+                .context("dokodemo requires address")?;
+            let port = if settings.port == 0 {
+                settings.rewrite_port
+            } else {
+                settings.port
+            };
+            Inbound::Dokodemo(Destination::new(&host, port)?)
+        }
+        "vless" | "trojan" | "shadowsocks" => proxies::inbound(&raw.protocol, &raw.settings)?,
+        "vmess" => vmess::inbound(&raw.settings)?,
+        other => bail!("inbound protocol {other:?} is not migrated yet"),
+    };
+    Ok((inbound, transport))
 }
 
 /// Strip Java/Python-style comments without changing byte offsets or line numbers.
@@ -737,9 +861,37 @@ mod tests {
                 .to_string()
                 .contains("outbound")
         );
-        assert!(Config::from_json(r#"{"dns":{"servers":["1.1.1.1"]}}"#).is_err());
         let config = Config::from_json(
             r#"{"outbounds":[{"protocol":"freedom","settings":{"fragment":{}}}]}"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn root_apps_parse_and_reject_go_visibly() {
+        // The `dns` root key is accepted and compiled by the DNS app; an empty
+        // server list is rejected with the app's own error, not an unknown
+        // field error.
+        let config = Config::from_json(
+            r#"{"dns":{"servers":["1.1.1.1"]},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+        let config =
+            Config::from_json(r#"{"dns":{"servers":[]},"outbounds":[{"protocol":"freedom"}]}"#)
+                .unwrap();
+        assert!(config.validate().is_err());
+        // `reverse` is a recognized root key compiled by ReverseConfig.
+        let config = Config::from_json(
+            r#"{"reverse":{"portals":[{"tag":"portal","domain":"test.example"}]},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert!(Config::from_json(r#"{"unknownRoot":1}"#).is_err());
+        // burstObservatory without pingConfig fails like Go's builder.
+        let config = Config::from_json(
+            r#"{"burstObservatory":{"subjectSelector":["a"]},"outbounds":[{"protocol":"freedom"}]}"#,
         )
         .unwrap();
         assert!(config.validate().is_err());

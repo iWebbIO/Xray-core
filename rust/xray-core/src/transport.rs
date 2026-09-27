@@ -79,6 +79,9 @@ impl InboundListener {
 #[derive(Clone, Default)]
 pub(crate) struct InboundTransport {
     pub tls: Option<tls::TlsServer>,
+    /// REALITY replaces the TLS accept: the handshake authenticates the
+    /// client against `realitySettings` and decrypts the application stream.
+    pub reality: Option<reality_inbound::InboundConfig>,
     pub xhttp: Option<xhttp::Server>,
     pub websocket: Option<websocket::Config>,
     pub httpupgrade: Option<httpupgrade::HttpUpgradeConfig>,
@@ -99,7 +102,27 @@ impl InboundTransport {
         }
     }
 
-    pub async fn accept(&self, mut stream: BoxStream) -> anyhow::Result<AcceptedTransport> {
+    pub async fn accept(&self, stream: BoxStream) -> anyhow::Result<AcceptedTransport> {
+        if let Some(config) = &self.reality {
+            // REALITY sits exactly where the TLS accept would; a failed
+            // exchange closes the connection with no plaintext fallback.
+            let (stream, info) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                reality_inbound::accept_stream(config, stream),
+            )
+            .await??;
+            if let Some(info) = info {
+                tracing::debug!(
+                    server_name = %info.server_name,
+                    "REALITY inbound accepted a client"
+                );
+            }
+            return self.accept_inner(stream).await;
+        }
+        self.accept_inner(stream).await
+    }
+
+    async fn accept_inner(&self, mut stream: BoxStream) -> anyhow::Result<AcceptedTransport> {
         if let Some(tls) = &self.tls {
             stream = tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 if self.grpc.is_some() {
@@ -141,6 +164,10 @@ pub(crate) struct OutboundTransport {
     pub tls: Option<tls::TlsClient>,
     pub reality: Option<reality::handshake::ClientConfig>,
     pub server_name: String,
+    /// MASQUE transport settings; the transport opens one HTTP/2
+    /// extended-CONNECT tunnel per dialed stream.
+    pub masque: Option<masque::Settings>,
+    pub masque_tls: Option<tls::TlsSettings>,
     pub xhttp: Option<xhttp::Config>,
     pub websocket: Option<websocket::Config>,
     pub httpupgrade: Option<httpupgrade::HttpUpgradeConfig>,
@@ -161,6 +188,13 @@ impl OutboundTransport {
         destination: &crate::address::Destination,
         resolved: Option<&[std::net::SocketAddr]>,
     ) -> anyhow::Result<(BoxStream, std::net::SocketAddr)> {
+        if let Some(settings) = &self.masque {
+            // The MASQUE transport dial (one TLS+h2 connection, then an
+            // extended CONNECT per target) is implemented by the wiring
+            // batch agent in this file; fail explicitly until it lands.
+            let _ = (settings, &self.masque_tls, resolved);
+            anyhow::bail!("MASQUE transport connect is not wired yet");
+        }
         if let Some(config) = &self.kcp {
             anyhow::ensure!(
                 self.reality.is_none(),

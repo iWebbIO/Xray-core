@@ -49,10 +49,17 @@ impl fmt::Debug for Account {
     }
 }
 
+/// One authenticated Trojan request plus its command; `udp` is true for the
+/// UDP-over-Trojan command 3, whose association is served by `trojan_udp`.
+pub struct Accepted {
+    pub request: Request,
+    pub udp: bool,
+}
+
 pub async fn read_request<R: AsyncRead + Unpin>(
     reader: &mut R,
     accounts: &[Account],
-) -> Result<Request> {
+) -> Result<Accepted> {
     let mut key = [0; 56];
     reader
         .read_exact(&mut key)
@@ -92,11 +99,16 @@ pub async fn read_request<R: AsyncRead + Unpin>(
         }
     }
     read_crlf(reader).await.context("Trojan destination CRLF")?;
-    Ok(Request {
-        destination,
-        user: account.email.clone(),
-        initial_payload: Vec::new(),
-        reply: Reply::None,
+    Ok(Accepted {
+        // Command 3 (UDP over Trojan) still fails explicitly above until the
+        // `trojan_udp` runtime wiring lands; `udp` is therefore always false.
+        request: Request {
+            destination,
+            user: account.email.clone(),
+            initial_payload: Vec::new(),
+            reply: Reply::None,
+        },
+        udp: false,
     })
 }
 
@@ -182,12 +194,13 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(encoded, fixture);
-            let request = read_request(&mut fixture.as_slice(), &[account()])
+            let accepted = read_request(&mut fixture.as_slice(), &[account()])
                 .await
                 .unwrap();
-            assert_eq!(request.destination, destination);
-            assert_eq!(request.user, "love@example.com");
-            assert!(matches!(request.reply, Reply::None));
+            assert_eq!(accepted.request.destination, destination);
+            assert_eq!(accepted.request.user, "love@example.com");
+            assert!(matches!(accepted.request.reply, Reply::None));
+            assert!(!accepted.udp);
             for length in 0..fixture.len() {
                 assert!(
                     read_request(&mut &fixture[..length], &[account()])
@@ -244,8 +257,8 @@ mod tests {
         let mut wire = request_fixture(&[1, 127, 0, 0, 1]);
         wire.extend_from_slice(b"test string");
         let mut reader = wire.as_slice();
-        let request = read_request(&mut reader, &[account()]).await.unwrap();
-        assert!(request.initial_payload.is_empty());
+        let accepted = read_request(&mut reader, &[account()]).await.unwrap();
+        assert!(accepted.request.initial_payload.is_empty());
         assert_eq!(reader, b"test string");
     }
 
@@ -265,8 +278,8 @@ mod tests {
                 assert_eq!(response, b"raw reply");
             };
             let server_task = async {
-                let request = read_request(&mut server, &[account()]).await.unwrap();
-                assert_eq!(request.destination.to_string(), "example.com:1234");
+                let accepted = read_request(&mut server, &[account()]).await.unwrap();
+                assert_eq!(accepted.request.destination.to_string(), "example.com:1234");
                 let mut payload = Vec::new();
                 server.read_to_end(&mut payload).await.unwrap();
                 assert_eq!(payload, b"test string");

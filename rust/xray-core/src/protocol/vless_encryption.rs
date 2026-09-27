@@ -774,6 +774,7 @@ mod tests {
             // The inner VLESS request header and body are encrypted by the
             // session in both directions.
             let account = vless::Account {
+                flow: String::new(),
                 id: [7; 16],
                 email: "known-user".into(),
             };
@@ -792,8 +793,11 @@ mod tests {
                 vless::read_request(&mut server_stream, std::slice::from_ref(&account)),
             )
             .await??;
-            assert_eq!(request.destination.to_string(), destination.to_string());
-            assert_eq!(request.user, "known-user");
+            assert_eq!(
+                request.request.destination.to_string(),
+                destination.to_string()
+            );
+            assert_eq!(request.request.user, "known-user");
             let mut body = vec![0; b"uplink body".len()];
             timeout(Duration::from_secs(5), server_stream.read_exact(&mut body)).await??;
             assert_eq!(body, b"uplink body");

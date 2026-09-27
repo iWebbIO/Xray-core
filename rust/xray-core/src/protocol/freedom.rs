@@ -63,6 +63,45 @@ struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct FinalRules(Vec<Rule>);
 
+/// Freedom `domainStrategy` from `infra/conf/freedom.go`, matched
+/// case-insensitively. Resolution behavior for the non-AsIs strategies lands
+/// with the DNS-app runtime wiring; until then those strategies fail
+/// explicitly at dial time instead of silently dialing by domain.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DomainStrategy {
+    #[default]
+    AsIs,
+    UseIp,
+    UseIp4,
+    UseIp6,
+    UseIp46,
+    UseIp64,
+    ForceIp,
+    ForceIp4,
+    ForceIp6,
+    ForceIp46,
+    ForceIp64,
+}
+
+impl DomainStrategy {
+    pub fn parse(name: &str) -> Result<Self> {
+        Ok(match name.to_ascii_lowercase().as_str() {
+            "" | "asis" => Self::AsIs,
+            "useip" => Self::UseIp,
+            "useipv4" => Self::UseIp4,
+            "useipv6" => Self::UseIp6,
+            "useipv4v6" => Self::UseIp46,
+            "useipv6v4" => Self::UseIp64,
+            "forceip" => Self::ForceIp,
+            "forceipv4" => Self::ForceIp4,
+            "forceipv6" => Self::ForceIp6,
+            "forceipv4v6" => Self::ForceIp46,
+            "forceipv6v4" => Self::ForceIp64,
+            other => anyhow::bail!("unsupported domain strategy: {other}"),
+        })
+    }
+}
+
 pub enum Admission {
     Allowed(Option<Vec<SocketAddr>>),
     Blocked(Duration),

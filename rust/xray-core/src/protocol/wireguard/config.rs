@@ -173,8 +173,9 @@ impl Endpoint {
     }
 }
 
-/// Input JSON settings. Deliberately has no Debug implementation: strings may
-/// contain private key material. Call build and then drop this raw settings value.
+/// Input JSON settings. No field is ever printed: strings may contain private
+/// key material, so the Debug implementation is non-exhaustive by design. Call
+/// build and then drop this raw settings value.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WireGuardConfig {
@@ -193,6 +194,14 @@ pub struct WireGuardConfig {
     pub domain_strategy: String,
     #[serde(rename = "remoteDNS", deserialize_with = "deserialize_null_default")]
     pub remote_dns: Vec<String>,
+}
+
+impl fmt::Debug for WireGuardConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireGuardConfig")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]

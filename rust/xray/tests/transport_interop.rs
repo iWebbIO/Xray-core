@@ -95,6 +95,7 @@ fn account() -> vless::Account {
             .expect("fixed fixture UUID")
             .as_bytes(),
         email: "transport-interop@xray.test".into(),
+        flow: String::new(),
     }
 }
 
@@ -424,9 +425,10 @@ async fn relay_vless<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     target: SocketAddr,
 ) -> Result<()> {
-    let request = vless::read_request(stream, &[account()])
+    let accepted = vless::read_request(stream, &[account()])
         .await
         .context("native server VLESS request")?;
+    let request = accepted.request;
     ensure!(
         request.destination == Destination::from(target),
         "native server received unexpected destination {}",

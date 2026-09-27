@@ -12,6 +12,7 @@ pub(super) async fn admit(
         Outbound::Freedom {
             redirect,
             final_rules,
+            ..
         } => {
             final_rules
                 .admit(origin, redirect.as_ref().unwrap_or(target))

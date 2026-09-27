@@ -1,11 +1,13 @@
-use anyhow::{Context, Result, ensure};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Account, Inbound, Outbound};
 use crate::{
     address::Destination,
-    protocol::{trojan, vless},
+    protocol::{trojan, vless, vless_encryption},
     user::parse_id,
 };
 
@@ -52,25 +54,41 @@ struct VlessUser {
 impl VlessUser {
     fn compile(&self, outbound: bool) -> Result<vless::Account> {
         ensure!(self.level == 0, "user policy levels are not migrated yet");
+        ensure!(self.seed.is_empty(), "VLESS seed flow is not migrated yet");
+        // Go accepts only the two Vision spellings (infra/conf/vless.go).
         ensure!(
-            self.flow.is_empty() && self.seed.is_empty(),
-            "VLESS Vision/seed flow is not migrated yet"
+            self.flow.is_empty()
+                || matches!(
+                    self.flow.as_str(),
+                    "xtls-rprx-vision" | "xtls-rprx-vision-udp443"
+                ),
+            "VLESS users: \"flow\" doesn't support {:?} in this version",
+            self.flow
         );
-        if outbound {
-            ensure!(
-                self.encryption == "none",
-                "VLESS encryption must be explicitly set to none; encryption is not migrated yet"
-            );
-        } else {
+        if !outbound {
             ensure!(
                 self.encryption.is_empty(),
-                "VLESS inbound users cannot specify encryption"
+                "VLESS users: \"encryption\" should not be in inbound settings"
             );
         }
         Ok(vless::Account {
             id: *parse_id(&self.id)?.as_bytes(),
             email: self.email.clone(),
+            flow: self.flow.clone(),
         })
+    }
+
+    /// Outbound account encryption: `none` yields the plaintext session while
+    /// valid `mlkem768x25519plus` profiles yield the shared encrypted session.
+    /// An empty value keeps Go's explicit `please add/set "encryption":"none"`.
+    fn compile_encryption(&self) -> Result<Option<Arc<vless_encryption::ClientEncryption>>> {
+        if self.encryption == "none" {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(
+            vless_encryption::ClientEncryption::parse(&self.encryption)
+                .context("VLESS users: unsupported \"encryption\"")?,
+        )))
     }
 }
 
@@ -223,10 +241,13 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
         "shadowsocks" => {
             let settings: ShadowsocksInbound =
                 serde_json::from_value(settings.clone()).context("Shadowsocks inbound settings")?;
-            ensure!(
-                matches!(settings.network.as_str(), "" | "tcp"),
-                "Shadowsocks UDP is not migrated yet"
-            );
+            let udp = match settings.network.as_str() {
+                // Go's nil NetworkList defaults to TCP only; `tcp,udp` opts in.
+                "" | "tcp" => false,
+                "tcp,udp" => true,
+                "udp" => bail!("udp-only Shadowsocks inbound is not migrated yet"),
+                other => bail!("unknown Shadowsocks network {other:?}"),
+            };
             let user = if let Some(users) = settings.clients.or(settings.users) {
                 ensure!(
                     users.len() == 1,
@@ -242,21 +263,29 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
                 }
             };
             if user.method.starts_with("2022-") {
-                Ok(Inbound::Shadowsocks2022(user.compile_2022()?))
+                Ok(Inbound::Shadowsocks2022 {
+                    account: user.compile_2022()?,
+                    udp,
+                })
             } else {
+                ensure!(!udp, "legacy Shadowsocks UDP is not migrated yet");
                 Ok(Inbound::Shadowsocks(user.compile()?))
             }
         }
         "vless" => {
             let settings: VlessInbound =
                 serde_json::from_value(settings.clone()).context("VLESS inbound settings")?;
-            ensure!(
-                settings.decryption == "none",
-                "VLESS decryption must be explicitly set to none; encryption is not migrated yet"
-            );
+            let decryption = match settings.decryption.as_str() {
+                "none" => None,
+                // parse("") produces Go's `please add/set "decryption":"none"`.
+                other => Some(Arc::new(
+                    vless_encryption::ServerDecryption::parse(other)
+                        .context("VLESS inbound decryption")?,
+                )),
+            };
             ensure!(
                 settings.flow.is_empty(),
-                "VLESS Vision flow is not migrated yet"
+                "VLESS inbound settings have no \"flow\" field; set flow per client"
             );
             ensure!(
                 settings.fallbacks.is_empty(),
@@ -272,7 +301,10 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
                 accounts.iter().all(|account| ids.insert(account.id)),
                 "duplicate VLESS user ID"
             );
-            Ok(Inbound::Vless(accounts))
+            Ok(Inbound::Vless {
+                accounts,
+                decryption,
+            })
         }
         "trojan" => {
             let settings: TrojanInbound =
@@ -282,12 +314,15 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
                 "Trojan fallbacks are not migrated yet"
             );
             let users = settings.clients.unwrap_or(settings.users);
-            Ok(Inbound::Trojan(
-                users
+            // Go's Trojan inbound has no network gate: command 3 (UDP over
+            // the Trojan connection) is always part of the protocol.
+            Ok(Inbound::Trojan {
+                accounts: users
                     .iter()
                     .map(TrojanUser::compile)
                     .collect::<Result<_>>()?,
-            ))
+                udp: true,
+            })
         }
         _ => unreachable!("caller selects supported proxy type"),
     }
@@ -417,9 +452,11 @@ pub(super) fn outbound(protocol: &str, settings: &Value) -> Result<Outbound> {
                 server.users.len() == 1,
                 "VLESS requires exactly one outbound user"
             );
+            let user = &server.users[0];
             Ok(Outbound::Vless {
                 server: Destination::new(&server.address, server.port)?,
-                account: server.users[0].compile(true)?,
+                account: user.compile(true)?,
+                encryption: user.compile_encryption()?,
             })
         }
         "trojan" => {
@@ -472,7 +509,9 @@ mod tests {
             let password = STANDARD.encode(vec![7; key_len]);
             let settings = json!({"method":method,"password":password,"email":"ss2022@test"});
             match inbound("shadowsocks", &settings).unwrap() {
-                Inbound::Shadowsocks2022(account) => assert_eq!(account.email(), "ss2022@test"),
+                Inbound::Shadowsocks2022 { account, .. } => {
+                    assert_eq!(account.email(), "ss2022@test")
+                }
                 _ => panic!("2022 cipher compiled as another protocol"),
             }
             let server =
@@ -500,7 +539,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unimplemented_flow_and_missing_encryption() {
+    fn vless_flow_and_encryption_follow_go_validation() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL};
+
+        // Missing/empty encryption keeps Go's explicit "add/set none" error.
         assert!(
             outbound(
                 "vless",
@@ -508,13 +550,66 @@ mod tests {
             )
             .is_err()
         );
-        assert!(outbound("vless", &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":"none","flow":"xtls-rprx-vision"})).is_err());
         assert!(
             outbound(
                 "vless",
-                &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":"none"})
+                &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":""})
             )
-            .is_ok()
+            .is_err()
+        );
+        // The two Vision spellings Go accepts, with plaintext sessions.
+        for flow in ["xtls-rprx-vision", "xtls-rprx-vision-udp443"] {
+            let Ok(Outbound::Vless {
+                account,
+                encryption,
+                ..
+            }) = outbound(
+                "vless",
+                &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":"none","flow":flow}),
+            )
+            else {
+                panic!("vision flow {flow} rejected");
+            };
+            assert_eq!(account.flow, flow);
+            assert!(encryption.is_none());
+        }
+        // Unknown flow values keep Go's rejection text.
+        assert!(outbound(
+            "vless",
+            &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":"none","flow":"xtls-rprx-direct"})
+        )
+        .is_err());
+        // A valid hybrid profile compiles into the encrypted session.
+        let key = BASE64URL.encode([7u8; 32]);
+        let encryption = format!("mlkem768x25519plus.native.1rtt.{key}");
+        assert!(matches!(
+            outbound(
+                "vless",
+                &json!({"address":"127.0.0.1","port":443,"id":"example","encryption":encryption})
+            ),
+            Ok(Outbound::Vless {
+                encryption: Some(_),
+                ..
+            })
+        ));
+        // Inbound decryption mirrors the outbound account encryption surface.
+        let seed = BASE64URL.encode([9u8; 32]);
+        let decryption = format!("mlkem768x25519plus.native.0-0s.{seed}");
+        assert!(matches!(
+            inbound(
+                "vless",
+                &json!({"decryption":decryption,"clients":[{"id":"example","flow":"xtls-rprx-vision"}]})
+            ),
+            Ok(Inbound::Vless { .. })
+        ));
+        // Missing decryption and user-level inbound encryption still fail.
+        assert!(inbound("vless", &json!({"clients":[{"id":"example"}]})).is_err());
+        assert!(
+            inbound(
+                "vless",
+                &json!({"decryption":"none","clients":[{"id":"example","encryption":"none"}]})
+            )
+            .is_err()
         );
         assert!(
             inbound(
@@ -523,5 +618,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn trojan_and_shadowsocks_udp_flags() {
+        assert!(matches!(
+            inbound("trojan", &json!({"clients":[{"password":"pw"}]})),
+            Ok(Inbound::Trojan { udp: true, .. })
+        ));
+        // 2022 ciphers opt into UDP via `tcp,udp`; legacy ciphers stay TCP-only.
+        let password = STANDARD.encode(vec![7; 32]);
+        let settings = json!({"method":"2022-blake3-aes-256-gcm","password":password});
+        assert!(matches!(
+            inbound("shadowsocks", &settings),
+            Ok(Inbound::Shadowsocks2022 { udp: false, .. })
+        ));
+        let mut udp_settings = settings.clone();
+        udp_settings["network"] = json!("tcp,udp");
+        assert!(matches!(
+            inbound("shadowsocks", &udp_settings),
+            Ok(Inbound::Shadowsocks2022 { udp: true, .. })
+        ));
+        let mut legacy = json!({"method":"aes-128-gcm","password":"pw"});
+        assert!(inbound("shadowsocks", &legacy).is_ok());
+        legacy["network"] = json!("tcp,udp");
+        assert!(inbound("shadowsocks", &legacy).is_err());
     }
 }

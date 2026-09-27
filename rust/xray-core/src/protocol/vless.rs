@@ -1,8 +1,10 @@
-//! VLESS version 0 TCP headers, without flow addons or VLESS encryption.
+//! VLESS version 0 TCP headers, with the Vision flow addon.
 //!
 //! The wire layout follows `proxy/vless/encoding/encoding.go`: version, UUID,
-//! addon length, command, port, and address. Reads consume exactly the header so
-//! a client may send application bytes in the same packet as its request.
+//! addon length, the protobuf `Addons{Flow, Seed}` message, command, port, and
+//! address. Reads consume exactly the header so a client may send application
+//! bytes in the same packet as its request. VLESS encryption is a separate
+//! session layer in `vless_encryption`.
 
 use std::{
     io,
@@ -25,6 +27,14 @@ const TCP_COMMAND: u8 = 1;
 pub struct Account {
     pub id: [u8; 16],
     pub email: String,
+    /// Per-user flow, `xtls-rprx-vision` for Vision accounts; empty otherwise.
+    pub flow: String,
+}
+
+/// One authenticated inbound request plus the flow addon it carried.
+pub struct Accepted {
+    pub request: Request,
+    pub flow: String,
 }
 
 /// Authenticate and read one base VLESS TCP request. The success response must
@@ -32,7 +42,7 @@ pub struct Account {
 pub async fn read_request<R: AsyncRead + Unpin>(
     reader: &mut R,
     accounts: &[Account],
-) -> Result<Request> {
+) -> Result<Accepted> {
     let version = reader.read_u8().await.context("read VLESS version")?;
     ensure!(version == VERSION, "unsupported VLESS version {version}");
 
@@ -58,11 +68,16 @@ pub async fn read_request<R: AsyncRead + Unpin>(
     let destination = read_destination(reader)
         .await
         .context("read VLESS destination")?;
-    Ok(Request {
-        destination,
-        user: account.email.clone(),
-        initial_payload: Vec::new(),
-        reply: Reply::Vless,
+    Ok(Accepted {
+        request: Request {
+            destination,
+            user: account.email.clone(),
+            initial_payload: Vec::new(),
+            reply: Reply::Vless,
+        },
+        // Reading the flow addon lands with the Vision runtime wiring; until
+        // then non-empty addons keep failing explicitly at the length check.
+        flow: String::new(),
     })
 }
 
@@ -74,11 +89,22 @@ pub async fn write_request<W: AsyncWrite + Unpin>(
     destination: &Destination,
 ) -> Result<()> {
     // Encode before touching the socket so invalid addresses send no partial
-    // authentication header. The largest valid base header is only 278 bytes.
-    let mut header = Vec::with_capacity(278);
+    // authentication header. The largest valid base header is 278 bytes; a
+    // flow addon adds at most 255 more.
+    let mut addons = Vec::new();
+    if !account.flow.is_empty() {
+        // protobuf `Addons{Flow: 1: string}`: field 1, length-delimited.
+        addons.push(0x0A);
+        addons.push(account.flow.len() as u8);
+        addons.extend_from_slice(account.flow.as_bytes());
+        ensure!(addons.len() <= 255, "VLESS flow addon exceeds 255 bytes");
+    }
+    let mut header = Vec::with_capacity(533);
     header.push(VERSION);
     header.extend_from_slice(&account.id);
-    header.extend_from_slice(&[0, TCP_COMMAND]);
+    header.push(addons.len() as u8);
+    header.extend_from_slice(&addons);
+    header.push(TCP_COMMAND);
     header.extend_from_slice(&destination.port.to_be_bytes());
     match &destination.address {
         Address::Ip(IpAddr::V4(ip)) => {
@@ -291,6 +317,7 @@ mod tests {
         Account {
             id: ID,
             email: "test@example.com".to_owned(),
+            flow: String::new(),
         }
     }
 
@@ -324,12 +351,13 @@ mod tests {
                 .unwrap();
             assert_eq!(encoded, fixture);
 
-            let request = read_request(&mut fixture.as_slice(), &[account()])
+            let accepted = read_request(&mut fixture.as_slice(), &[account()])
                 .await
                 .unwrap();
-            assert_eq!(request.destination, destination);
-            assert_eq!(request.user, "test@example.com");
-            assert!(matches!(request.reply, Reply::Vless));
+            assert_eq!(accepted.request.destination, destination);
+            assert_eq!(accepted.request.user, "test@example.com");
+            assert!(matches!(accepted.request.reply, Reply::Vless));
+            assert_eq!(accepted.flow, "");
             for length in 0..fixture.len() {
                 assert!(
                     read_request(&mut &fixture[..length], &[account()])
@@ -339,6 +367,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn vision_flow_addon_is_written_and_unparsed_addons_still_reject() {
+        let mut vision = account();
+        vision.flow = "xtls-rprx-vision".into();
+        let destination = Destination::new("example.com", 443).unwrap();
+        let mut encoded = Vec::new();
+        write_request(&mut encoded, &vision, &destination)
+            .await
+            .unwrap();
+        let mut expected = vec![0];
+        expected.extend_from_slice(&ID);
+        expected.push(2 + 16); // addon length: tag, length byte, 16-byte flow
+        expected.extend_from_slice(&[0x0A, 16]);
+        expected.extend_from_slice(b"xtls-rprx-vision");
+        expected.push(1);
+        expected.extend_from_slice(&[0x01, 0xbb]);
+        expected.extend_from_slice(&[2, 11]);
+        expected.extend_from_slice(b"example.com");
+        assert_eq!(encoded, expected);
+        // Until the Vision read side lands, non-empty addons fail explicitly.
+        assert!(
+            read_request(&mut encoded.as_slice(), &[vision])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -377,8 +432,8 @@ mod tests {
         let mut wire = request_fixture(&[1, 127, 0, 0, 1]);
         wire.extend_from_slice(b"early application bytes");
         let mut reader = wire.as_slice();
-        let request = read_request(&mut reader, &[account()]).await.unwrap();
-        assert!(request.initial_payload.is_empty());
+        let accepted = read_request(&mut reader, &[account()]).await.unwrap();
+        assert!(accepted.request.initial_payload.is_empty());
         assert_eq!(reader, b"early application bytes");
 
         let mut response = Vec::new();
@@ -412,8 +467,8 @@ mod tests {
                 assert_eq!(reply, b"world");
             };
             let server_task = async {
-                let request = read_request(&mut server, &[account()]).await.unwrap();
-                assert_eq!(request.destination.to_string(), "example.com:443");
+                let accepted = read_request(&mut server, &[account()]).await.unwrap();
+                assert_eq!(accepted.request.destination.to_string(), "example.com:443");
                 let mut payload = [0; 5];
                 server.read_exact(&mut payload).await.unwrap();
                 assert_eq!(&payload, b"hello");

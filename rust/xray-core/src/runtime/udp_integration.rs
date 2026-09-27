@@ -20,6 +20,7 @@ pub(super) fn dispatcher(
     router: Arc<Router>,
     stats: Option<&StatsManager>,
     system: SystemStatsPolicy,
+    resolver: Arc<dyn udp_routing::UdpResolver>,
 ) -> Result<Arc<dyn udp::UdpDispatcher>> {
     let routes = outbounds
         .iter()
@@ -45,14 +46,10 @@ pub(super) fn dispatcher(
             }
         })
         .collect();
-    // Config currently rejects top-level DNS. This is the explicit system-DNS
-    // choice, never an error fallback for a configured resolver.
-    let mut dispatcher = udp_routing::RoutingDispatcher::new(
-        router,
-        routes,
-        "socks",
-        Arc::new(udp_routing::SystemResolver),
-    )?;
+    // The caller picks the resolver: the configured DNS app when a `dns`
+    // object exists, otherwise the explicit system-DNS choice. A configured
+    // resolver is never silently replaced by the system one.
+    let mut dispatcher = udp_routing::RoutingDispatcher::new(router, routes, "socks", resolver)?;
     if let Some(stats) = stats {
         dispatcher = dispatcher.with_stats(stats, system);
     }

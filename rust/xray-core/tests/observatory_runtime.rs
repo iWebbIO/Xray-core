@@ -98,12 +98,14 @@ fn service_requires_real_configuration_and_burst_remains_rejected() {
         json!({"probeURL":"ftp://probe.invalid/"}),
     );
     assert!(invalid.validate().is_err());
-    assert!(
-        Config::from_json(
-            &json!({"outbounds":[{"protocol":"freedom"}],"burstObservatory":{}}).to_string()
-        )
-        .is_err()
-    );
+    // `burstObservatory` is now a recognized root key: an empty object parses
+    // and fails validation through the batch parser's own Go-accurate rule
+    // (a valid pingConfig is mandatory).
+    let burst = Config::from_json(
+        &json!({"outbounds":[{"protocol":"freedom"}],"burstObservatory":{}}).to_string(),
+    )
+    .unwrap();
+    assert!(burst.validate().is_err());
 }
 
 #[tokio::test]

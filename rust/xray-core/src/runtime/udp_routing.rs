@@ -89,6 +89,7 @@ impl RouteOutbound {
             Outbound::Freedom {
                 redirect,
                 final_rules,
+                ..
             } if bare => Capability::Direct {
                 redirect: redirect.clone(),
                 final_rules: final_rules.clone(),
@@ -269,6 +270,7 @@ mod tests {
 
     fn direct(rules: serde_json::Value, redirect: Option<Destination>) -> Outbound {
         Outbound::Freedom {
+            strategy: Default::default(),
             redirect,
             final_rules: FinalRules::compile(
                 &serde_json::from_value::<Vec<RuleConfig>>(rules).unwrap(),

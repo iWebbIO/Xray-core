@@ -1921,8 +1921,12 @@ mod tests {
                 5 | 6 => (180, 210),
                 _ => unreachable!(),
             };
+            // The paused tokio clock advances in whole milliseconds, so a
+            // jittered wake deadline in the final sub-millisecond of the
+            // round quantizes up to the round boundary itself; the round
+            // window is therefore inclusive at the top.
             assert!(
-                elapsed >= Duration::from_millis(low) && elapsed < Duration::from_millis(high),
+                elapsed >= Duration::from_millis(low) && elapsed <= Duration::from_millis(high),
                 "call {index} at {elapsed:?}"
             );
         }

@@ -11,12 +11,19 @@ use tokio_util::sync::CancellationToken;
 
 mod accounting;
 mod admission;
+mod burst_observatory;
 mod dialer_proxy;
+mod dns_runtime;
+mod handler_registry;
 mod observatory;
+mod reverse_runtime;
 mod sniffing;
+mod ss2022_udp_runtime;
+mod trojan_udp_runtime;
 pub mod udp;
 mod udp_integration;
 pub mod udp_routing;
+mod wireguard_runtime;
 
 use crate::{
     address::Destination,
@@ -44,6 +51,16 @@ struct Dispatcher {
     outbound_tags: Vec<String>,
     logger: crate::logging::Logger,
     api: Option<crate::api::ApiStreamSender>,
+    /// The configured DNS app, used by freedom's non-AsIs strategies, the UDP
+    /// dispatcher resolver and (once wired) routed lookups.
+    #[allow(dead_code)] // read by the DNS wiring batch agent
+    dns: Option<Arc<crate::dns::app::DnsApp>>,
+    /// Reverse app handle; installed once after construction because the
+    /// bridges dial carriers through this very dispatcher.
+    reverse: std::sync::OnceLock<Arc<reverse_runtime::ReverseRuntime>>,
+    /// Lazily-built WireGuard engines, one per outbound settings value.
+    #[allow(dead_code)] // read by the WireGuard wiring batch agent
+    wireguard: wireguard_runtime::WireguardPool,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -67,6 +84,9 @@ impl Server {
 
     pub async fn start_with_logger(config: Config, logger: crate::logging::Logger) -> Result<Self> {
         let compiled = config.compile()?;
+        // Created before the app runtimes: the reverse bridges and the
+        // handler registry both link their child tasks to this token.
+        let cancel_token = CancellationToken::new();
         let policy = config
             .policy
             .as_ref()
@@ -88,17 +108,27 @@ impl Server {
         let mut outbound_tags: Vec<_> =
             config.outbounds.iter().map(|raw| raw.tag.clone()).collect();
         let router = Arc::new(compiled.router);
-        let udp = if compiled
+        let needs_udp = compiled
             .inbounds
             .iter()
-            .any(|(_, inbound, _)| matches!(inbound, Inbound::Socks(settings) if settings.udp))
-        {
+            .any(|(_, inbound, _)| match inbound {
+                Inbound::Socks(settings) => settings.udp,
+                Inbound::Trojan { udp, .. } => *udp,
+                Inbound::Shadowsocks2022 { udp, .. } => *udp,
+                _ => false,
+            });
+        let udp_resolver: Arc<dyn udp_routing::UdpResolver> = match &compiled.dns {
+            Some(app) => dns_runtime::resolver(app.clone()),
+            None => Arc::new(udp_routing::SystemResolver),
+        };
+        let udp = if needs_udp {
             Some(udp_integration::dispatcher(
                 &config,
                 &compiled.outbounds,
                 router.clone(),
                 stats.as_deref(),
                 policy.for_system().stats,
+                udp_resolver,
             )?)
         } else {
             None
@@ -121,6 +151,9 @@ impl Server {
             api_channel = Some(incoming);
         }
         let mut listeners: Vec<(InboundListener, Inbound, String, InboundTransport)> = Vec::new();
+        // Startup inbound snapshots for the HandlerService registry, plus the
+        // SS2022 UDP listeners that bind alongside their TCP listener.
+        let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
         let mut addresses = Vec::new();
         for (raw, inbound, transport) in compiled.inbounds {
             let listener = match transport
@@ -145,7 +178,33 @@ impl Server {
                 }
             };
             addresses.push(listener.local_addr()?);
+            seeds.push((raw.clone(), inbound.clone(), transport.clone()));
             listeners.push((listener, inbound, raw.tag, transport));
+        }
+        let mut udp_listeners = Vec::new();
+        for (raw, inbound, _) in &seeds {
+            if let Inbound::Shadowsocks2022 { account, udp: true } = inbound {
+                let bound = ss2022_udp_runtime::Ss2022UdpListener::bind(
+                    SocketAddr::new(raw.listen, raw.port),
+                    account,
+                );
+                let bound = match bound {
+                    Ok(bound) => bound,
+                    Err(error) => {
+                        // Release the already-bound TCP listeners before the
+                        // failed startup propagates, exactly like a TCP bind
+                        // failure inside the loop above.
+                        for (listener, _, _, _) in listeners {
+                            if let Err(close_error) = listener.close().await {
+                                tracing::warn!(%close_error, "inbound rollback close failed");
+                            }
+                        }
+                        return Err(error)
+                            .with_context(|| format!("cannot bind inbound {:?} UDP", raw.tag));
+                    }
+                };
+                udp_listeners.push((bound, raw.tag.clone()));
+            }
         }
         let dispatcher = Arc::new(Dispatcher {
             outbounds: compiled.outbounds,
@@ -157,11 +216,35 @@ impl Server {
             outbound_tags,
             logger,
             api: api_sender,
+            dns: compiled.dns.clone(),
+            reverse: Default::default(),
+            wireguard: wireguard_runtime::WireguardPool::new(),
         });
         let observatory = compiled
             .observatory
             .map(|compiled| observatory::new(compiled, dispatcher.clone()))
             .transpose()?;
+        // Built after the dispatcher: the reverse bridges dial their carriers
+        // through this very dispatcher, and the burst observer probes through
+        // the runtime's own establish path.
+        let burst = match compiled.burst {
+            Some(settings) => Some(burst_observatory::new(settings, dispatcher.clone())?),
+            None => None,
+        };
+        if let Some(config) = &compiled.reverse {
+            let runtime = reverse_runtime::new(config, dispatcher.clone(), cancel_token.clone())?;
+            // Single installation at startup; the OnceLock only needs to
+            // outlive this constructor. The runtime keeps its own handle.
+            let _ = dispatcher.reverse.set(runtime.clone());
+            runtime.start()?;
+        }
+        // The registry serves HandlerService listings from the startup
+        // snapshot and can spawn added inbounds through the accept loop.
+        let registry =
+            handler_registry::RuntimeRegistry::new(dispatcher.clone(), cancel_token.clone());
+        for (raw, inbound, transport) in seeds {
+            registry.seed_inbound(raw, inbound, transport);
+        }
         let api_server = config.api.as_ref().map(|api| {
             let mut routes = tonic::service::Routes::default();
             for service in &api.services {
@@ -186,24 +269,52 @@ impl Server {
                 .iter()
                 .any(|service| service.eq_ignore_ascii_case("ObservatoryService"))
             {
-                let provider = observatory
-                    .as_ref()
-                    .expect("configuration requires observatory provider")
-                    .provider();
+                let provider = if let Some(ordinary) = observatory.as_ref() {
+                    ordinary.provider()
+                } else {
+                    burst
+                        .as_ref()
+                        .expect("configuration requires an observatory provider")
+                        .provider()
+                };
                 routes = crate::api::observatory::add_observatory_routes(
                     routes,
                     crate::api::observatory::ObservatoryService::new(provider),
                 );
             }
+            if api
+                .services
+                .iter()
+                .any(|service| service.eq_ignore_ascii_case("HandlerService"))
+            {
+                routes = crate::api::handler::add_handler_routes(
+                    routes,
+                    crate::api::handler::HandlerService::new(registry.store()),
+                );
+            }
             crate::api::ApiServer::from_routes(routes)
         });
-        let cancel = CancellationToken::new();
+        let cancel = cancel_token;
         let stopping = cancel.clone();
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
             if let Some(observer) = observatory.filter(|observer| observer.is_enabled()) {
                 let stop = stopping.clone();
                 tasks.spawn(async move { observer.run(&stop).await });
+            }
+            if let Some(burst) = burst.filter(|burst| burst.is_enabled()) {
+                let stop = stopping.clone();
+                tasks.spawn(async move { burst.run(&stop).await });
+            }
+            for (listener, tag) in udp_listeners {
+                let dispatcher = dispatcher.clone();
+                let stop = stopping.clone();
+                tasks.spawn(async move {
+                    if let Err(error) = listener.run(dispatcher, stop).await {
+                        tracing::warn!(inbound = %tag, %error, "SS2022 UDP listener ended");
+                    }
+                    Ok::<(), anyhow::Error>(())
+                });
             }
             if let Some(api) = api_server {
                 if let Some(listener) = api_listener {
@@ -428,8 +539,8 @@ async fn handle_stream(
         result = timeout(policy.timeouts.handshake, proxy_handshake(stream, inbound)) => result.context("proxy handshake timed out")??,
     };
     let request = match handshake {
-        protocol::socks::Handshake::Connect(request) => request,
-        protocol::socks::Handshake::Associate(request) => {
+        InboundHandshake::Connect(request) => request,
+        InboundHandshake::SocksAssociate(request) => {
             let Inbound::Socks(settings) = inbound else {
                 unreachable!("only SOCKS can associate UDP")
             };
@@ -443,6 +554,14 @@ async fn handle_stream(
                 cancel,
             )
             .await;
+        }
+        // Trojan carries its UDP association as frames over the very
+        // connection that carried the request header.
+        InboundHandshake::TrojanUdp(request) => {
+            let Inbound::Trojan { .. } = inbound else {
+                unreachable!("only Trojan associates UDP over its connection")
+            };
+            return trojan_udp_runtime::serve(stream, request, dispatcher, tag, cancel).await;
         }
     };
     let exchange = async {
@@ -498,11 +617,11 @@ async fn handle_stream(
                     Inbound::Socks(_) => "socks",
                     Inbound::Http(_) => "http",
                     Inbound::Dokodemo(_) => "dokodemo-door",
-                    Inbound::Vless(_) => "vless",
+                    Inbound::Vless { .. } => "vless",
                     Inbound::Vmess(_) => "vmess",
-                    Inbound::Trojan(_) => "trojan",
+                    Inbound::Trojan { .. } => "trojan",
                     Inbound::Shadowsocks(_) => "shadowsocks",
-                    Inbound::Shadowsocks2022(_) => "shadowsocks-2022",
+                    Inbound::Shadowsocks2022 { .. } => "shadowsocks-2022",
                 };
                 let admission = timeout(
                     DIAL_TIMEOUT,
@@ -645,31 +764,72 @@ async fn handle_stream(
     }
 }
 
+/// The three inbound session shapes the connection dispatcher understands.
+enum InboundHandshake {
+    /// One proxied TCP request.
+    Connect(protocol::Request),
+    /// A SOCKS UDP ASSOCIATE with its control-stream protocol.
+    SocksAssociate(protocol::socks::AssociateRequest),
+    /// A Trojan UDP association: frames over the request's own connection.
+    TrojanUdp(protocol::Request),
+}
+
 async fn proxy_handshake(
     mut stream: BoxStream,
     inbound: &Inbound,
-) -> Result<(BoxStream, protocol::socks::Handshake)> {
+) -> Result<(BoxStream, InboundHandshake)> {
     use protocol::socks::Handshake;
     let request = match inbound {
         Inbound::Vmess(authenticator) => {
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
-            return Ok((stream, Handshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request)));
         }
         Inbound::Shadowsocks(account) => {
             let (stream, request) = protocol::shadowsocks_session::accept(stream, account).await?;
-            return Ok((stream, Handshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request)));
         }
-        Inbound::Shadowsocks2022(account) => {
+        Inbound::Shadowsocks2022 { account, .. } => {
             let (stream, request) = protocol::shadowsocks2022::accept(stream, account).await?;
-            return Ok((stream, Handshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request)));
         }
         Inbound::Socks(settings) => {
-            let request = protocol::socks::handshake_with_udp(&mut stream, settings).await?;
-            return Ok((stream, request));
+            let handshake = protocol::socks::handshake_with_udp(&mut stream, settings).await?;
+            return match handshake {
+                Handshake::Connect(request) => Ok((stream, InboundHandshake::Connect(request))),
+                Handshake::Associate(request) => {
+                    Ok((stream, InboundHandshake::SocksAssociate(request)))
+                }
+            };
         }
         Inbound::Http(settings) => protocol::http::handshake(&mut stream, settings).await?,
-        Inbound::Vless(accounts) => protocol::vless::read_request(&mut stream, accounts).await?,
-        Inbound::Trojan(accounts) => protocol::trojan::read_request(&mut stream, accounts).await?,
+        Inbound::Vless {
+            accounts,
+            decryption,
+        } => {
+            // `mlkem768x25519plus` wraps the whole VLESS session: the request
+            // header is exchanged inside the encrypted stream, and the shared
+            // decryption instance keeps its replay history across connections.
+            let mut stream: BoxStream = match decryption {
+                Some(server) => Box::new(
+                    protocol::vless_encryption::accept(stream, server)
+                        .await
+                        .context("VLESS encrypted session")?,
+                ),
+                None => stream,
+            };
+            let accepted = protocol::vless::read_request(&mut stream, accounts).await?;
+            // The Vision body wrap lands with the runtime wiring batch; the
+            // request's flow addon is validated against the account by the
+            // reader.
+            return Ok((stream, InboundHandshake::Connect(accepted.request)));
+        }
+        Inbound::Trojan { accounts, .. } => {
+            let accepted = protocol::trojan::read_request(&mut stream, accounts).await?;
+            if accepted.udp {
+                return Ok((stream, InboundHandshake::TrojanUdp(accepted.request)));
+            }
+            return Ok((stream, InboundHandshake::Connect(accepted.request)));
+        }
         Inbound::Dokodemo(destination) => Request {
             destination: destination.clone(),
             user: String::new(),
@@ -677,7 +837,7 @@ async fn proxy_handshake(
             reply: Reply::None,
         },
     };
-    Ok((stream, Handshake::Connect(request)))
+    Ok((stream, InboundHandshake::Connect(request)))
 }
 
 fn source_ip_string(source: SocketAddr) -> String {
@@ -705,16 +865,31 @@ async fn establish(
     counters: TrafficCounters,
 ) -> Result<(crate::transport::BoxStream, SocketAddr)> {
     let remote = match outbound {
-        Outbound::Freedom { redirect, .. } => redirect.as_ref().unwrap_or(target),
+        Outbound::Freedom {
+            redirect, strategy, ..
+        } => {
+            // Non-AsIs strategies resolve through the configured DNS app (or
+            // the system resolver when no `dns` app exists); the resolution
+            // itself lands with the DNS runtime wiring and fails explicitly
+            // until then.
+            if *strategy != crate::protocol::freedom::DomainStrategy::AsIs {
+                anyhow::bail!("freedom domain strategy resolution is not wired yet");
+            }
+            redirect.as_ref().unwrap_or(target)
+        }
         Outbound::Socks { server, .. }
         | Outbound::Http { server, .. }
         | Outbound::Vless { server, .. }
         | Outbound::Vmess { server, .. }
         | Outbound::Trojan { server, .. }
         | Outbound::Shadowsocks { server, .. }
-        | Outbound::Shadowsocks2022 { server, .. } => server,
+        | Outbound::Shadowsocks2022 { server, .. }
+        | Outbound::Masque { server, .. } => server,
         Outbound::Blackhole { .. } | Outbound::Api => {
             anyhow::bail!("internal outbound cannot establish a remote stream")
+        }
+        Outbound::Wireguard { .. } => {
+            anyhow::bail!("WireGuard outbound dispatch is not wired yet")
         }
     };
     let (mut stream, bound) = if let Some(addresses) = resolved {
@@ -760,7 +935,21 @@ async fn establish(
         Outbound::Http { account, .. } => {
             protocol::outbound::http_connect(&mut stream, target, account.as_ref()).await?
         }
-        Outbound::Vless { account, .. } => {
+        Outbound::Vless {
+            account,
+            encryption,
+            ..
+        } => {
+            // The hybrid encrypted session wraps the transport before the
+            // VLESS header; the plaintext path is the historical behavior.
+            let mut stream: BoxStream = match encryption {
+                Some(client) => Box::new(
+                    protocol::vless_encryption::connect(stream, client)
+                        .await
+                        .context("VLESS encrypted session")?,
+                ),
+                None => stream,
+            };
             protocol::vless::write_request(&mut stream, account, target).await?;
             return Ok((Box::new(protocol::vless::VlessStream::new(stream)), bound));
         }
