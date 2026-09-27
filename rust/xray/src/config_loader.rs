@@ -923,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(invalid_from_utf8)] // deliberately asserting the binary fixture is not UTF-8
     fn protobuf_file_and_forced_stdin_preserve_non_utf8_bytes() {
         let bytes = include_bytes!("../../fixtures/protobuf/basic.pb");
         assert!(std::str::from_utf8(bytes).is_err());

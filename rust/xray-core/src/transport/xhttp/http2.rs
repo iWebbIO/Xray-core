@@ -383,11 +383,10 @@ fn accept_request(
         404
     } else if head.method == "OPTIONS" {
         200
-    } else if !config.valid_padding(&head) {
-        400
-    } else if metadata
-        .as_ref()
-        .is_ok_and(|(session, _)| !session.is_empty())
+    } else if !config.valid_padding(&head)
+        || metadata
+            .as_ref()
+            .is_ok_and(|(session, _)| !session.is_empty())
     {
         400
     } else {

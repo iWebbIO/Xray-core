@@ -67,6 +67,7 @@ fn assert_success(output: Output) {
 }
 
 #[test]
+#[allow(invalid_from_utf8)] // deliberately asserting the binary fixture is not UTF-8
 fn binary_file_auto_detection_and_format_override() {
     assert!(std::str::from_utf8(CONFIG).is_err());
     let fixture = Fixture::new();

@@ -32,8 +32,7 @@ async fn echo() -> Echo {
                     let (mut stream,_)=accepted.unwrap();
                     sessions.spawn(async move {
                         let mut bytes=[0;8192];
-                        loop {
-                            let Ok(count)=stream.read(&mut bytes).await else { break; };
+                        while let Ok(count)=stream.read(&mut bytes).await {
                             if count==0 { break; }
                             for byte in &mut bytes[..count] { *byte=byte.rotate_left(1)^0xa5; }
                             if stream.write_all(&bytes[..count]).await.is_err() { break; }

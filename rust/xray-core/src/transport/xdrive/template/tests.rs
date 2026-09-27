@@ -174,7 +174,7 @@ async fn template_static_auth_headers_put_body_and_flattened_listing_match_go() 
         serde_json::from_slice::<Value>(&request.body).unwrap(),
         json!({"name":"streams~abc~c2s~000000000.seg","data":"AP8H","unknown":"{unknown}"})
     );
-    let _ = request.reply(201, b"created");
+    drop(request.reply(201, b"created"));
     put.await.unwrap().unwrap();
     let list = {
         let storage = storage.clone();
@@ -182,7 +182,7 @@ async fn template_static_auth_headers_put_body_and_flattened_listing_match_go() 
     };
     let request = server.next().await;
     assert_eq!(request.target, "/list/bucket/streams~abc");
-    let _ = request.reply(200, b"<name>streams~abc~c2s~000.seg</name><name>streams~abc~c2s~001.seg</name><name>streams~abc~s2c~000.end</name><name>other~abc~x</name><name>streams~abc~</name>");
+    drop(request.reply(200, b"<name>streams~abc~c2s~000.seg</name><name>streams~abc~c2s~001.seg</name><name>streams~abc~s2c~000.end</name><name>other~abc~x</name><name>streams~abc~</name>"));
     let entries = list.await.unwrap().unwrap();
     assert_eq!(
         entries
@@ -213,7 +213,7 @@ async fn basic_auth_raw_upload_and_get_delete_list_error_mapping_match_go() {
         request.headers["authorization"],
         format!("Basic {}", STANDARD.encode("user:given-secret"))
     );
-    let _ = request.reply(204, b"");
+    drop(request.reply(204, b""));
     put.await.unwrap().unwrap();
     let get = {
         let storage = storage.clone();
@@ -222,7 +222,7 @@ async fn basic_auth_raw_upload_and_get_delete_list_error_mapping_match_go() {
     let request = server.next().await;
     assert_eq!(request.method, "GET");
     assert!(request.body.is_empty());
-    let _ = request.reply(404, b"sensitive service detail");
+    drop(request.reply(404, b"sensitive service detail"));
     let error = get.await.unwrap().unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!error.to_string().contains("sensitive"));
@@ -232,13 +232,13 @@ async fn basic_auth_raw_upload_and_get_delete_list_error_mapping_match_go() {
     };
     let request = server.next().await;
     assert_eq!(request.method, "DELETE");
-    let _ = request.reply(404, b"");
+    drop(request.reply(404, b""));
     delete.await.unwrap().unwrap();
     let list = {
         let storage = storage.clone();
         tokio::spawn(async move { storage.list("missing").await })
     };
-    let _ = server.next().await.reply(404, b"");
+    drop(server.next().await.reply(404, b""));
     assert!(list.await.unwrap().unwrap().is_empty());
 }
 
@@ -267,16 +267,16 @@ async fn oauth_uses_explicit_raw_form_refreshes_rejected_token_and_caches_new_to
         b"grant_type=refresh_token&refresh_token=pre%2Bescaped"
     );
     assert!(!request.headers.contains_key("authorization"));
-    let _ = request.reply(200, br#"{"result":{"token":"old","expires":3600}}"#);
+    drop(request.reply(200, br#"{"result":{"token":"old","expires":3600}}"#));
     let request = server.next().await;
     assert_eq!(request.headers["authorization"], "Bearer old");
-    let _ = request.reply(401, b"expired");
+    drop(request.reply(401, b"expired"));
     let request = server.next().await;
     assert_eq!(request.target, "/token");
-    let _ = request.reply(200, br#"{"result":{"token":"new","expires":3600}}"#);
+    drop(request.reply(200, br#"{"result":{"token":"new","expires":3600}}"#));
     let request = server.next().await;
     assert_eq!(request.headers["authorization"], "Bearer new");
-    let _ = request.reply(200, b"payload");
+    drop(request.reply(200, b"payload"));
     assert_eq!(get.await.unwrap().unwrap(), b"payload");
     let get = {
         let storage = storage.clone();
@@ -285,7 +285,7 @@ async fn oauth_uses_explicit_raw_form_refreshes_rejected_token_and_caches_new_to
     let request = server.next().await;
     assert_eq!(request.target, "/objects/bucket/again");
     assert_eq!(request.headers["authorization"], "Bearer new");
-    let _ = request.reply(200, b"cached");
+    drop(request.reply(200, b"cached"));
     assert_eq!(get.await.unwrap().unwrap(), b"cached");
 }
 
@@ -300,19 +300,21 @@ async fn configured_status_and_dotted_rate_reason_retry_but_exhaust_at_eight_att
         let storage = storage.clone();
         tokio::spawn(async move { storage.get("eventual").await })
     };
-    let _ = server.next().await.reply(429, b"");
-    let _ = server
-        .next()
-        .await
-        .reply(403, br#"{"error":{"reason":"quota"}}"#);
-    let _ = server.next().await.reply(200, b"ok");
+    drop(server.next().await.reply(429, b""));
+    drop(
+        server
+            .next()
+            .await
+            .reply(403, br#"{"error":{"reason":"quota"}}"#),
+    );
+    drop(server.next().await.reply(200, b"ok"));
     assert_eq!(get.await.unwrap().unwrap(), b"ok");
     let get = {
         let storage = storage.clone();
         tokio::spawn(async move { storage.get("unavailable").await })
     };
     for _ in 0..ATTEMPTS {
-        let _ = server.next().await.reply(503, b"");
+        drop(server.next().await.reply(503, b""));
     }
     assert!(get.await.unwrap().unwrap_err().to_string().contains("503"));
     assert!(
@@ -348,7 +350,7 @@ async fn bounded_content_length_chunked_and_request_bodies_fail_without_clipping
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\n123\r\n2\r\n45\r\n0\r\n\r\n".to_vec(),
     ] {
         let get = { let storage = storage.clone(); tokio::spawn(async move { storage.get("large").await }) };
-        let _ = server.next().await.raw(raw, false);
+        drop(server.next().await.raw(raw, false));
         let error = get.await.unwrap().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("size limit"));
@@ -357,7 +359,7 @@ async fn bounded_content_length_chunked_and_request_bodies_fail_without_clipping
         let storage = storage.clone();
         tokio::spawn(async move { storage.get("fits").await })
     };
-    let _ = server.next().await.reply(200, b"1234");
+    drop(server.next().await.reply(200, b"1234"));
     assert_eq!(get.await.unwrap().unwrap(), b"1234");
 }
 
@@ -381,7 +383,7 @@ async fn token_body_limit_rejects_oversize_before_an_authenticated_operation() {
     };
     let request = server.next().await;
     assert_eq!(request.target, "/token");
-    let _ = request.reply(200, br#"{"access_token":"secret"}"#);
+    drop(request.reply(200, br#"{"access_token":"secret"}"#));
     assert_eq!(
         get.await.unwrap().unwrap_err().kind(),
         io::ErrorKind::InvalidData
@@ -417,7 +419,7 @@ async fn gzip_response_limit_counts_decoded_bytes() {
     ];
     let mut response = format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", compressed.len()).into_bytes();
     response.extend_from_slice(&compressed);
-    let _ = request.raw(response, false);
+    drop(request.raw(response, false));
     assert_eq!(
         get.await.unwrap().unwrap_err().kind(),
         io::ErrorKind::InvalidData
@@ -500,7 +502,7 @@ async fn dropping_operation_releases_concurrency_permit_and_closes_response() {
         let storage = storage.clone();
         tokio::spawn(async move { storage.get("next").await })
     };
-    let _ = server.next().await.reply(200, b"ok");
+    drop(server.next().await.reply(200, b"ok"));
     assert_eq!(get.await.unwrap().unwrap(), b"ok");
 }
 
@@ -516,7 +518,7 @@ async fn close_interrupts_retry_delay() {
         let storage = storage.clone();
         tokio::spawn(async move { storage.get("retry").await })
     };
-    let _ = server.next().await.reply(503, b"");
+    drop(server.next().await.reply(503, b""));
     assert!(
         timeout(Duration::from_millis(20), server.requests.recv())
             .await
@@ -562,10 +564,10 @@ async fn cancelling_oauth_body_releases_token_lock_for_the_next_request() {
     };
     let request = server.next().await;
     assert_eq!(request.target, "/token");
-    let _ = request.reply(200, br#"{"access_token":"usable"}"#);
+    drop(request.reply(200, br#"{"access_token":"usable"}"#));
     let request = server.next().await;
     assert_eq!(request.headers["authorization"], "Bearer usable");
-    let _ = request.reply(200, b"ok");
+    drop(request.reply(200, b"ok"));
     assert_eq!(get.await.unwrap().unwrap(), b"ok");
 }
 
@@ -583,11 +585,11 @@ async fn redirects_do_not_leak_sensitive_template_headers_to_other_hosts() {
     let request = source.next().await;
     assert_eq!(request.headers["authorization"], "Bearer given-secret");
     let destination_url = destination.url.replace("127.0.0.1", "localhost");
-    let _ = request.raw(format!("HTTP/1.1 302 Found\r\nLocation: {destination_url}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(), false);
+    drop(request.raw(format!("HTTP/1.1 302 Found\r\nLocation: {destination_url}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(), false));
     let request = destination.next().await;
     assert!(!request.headers.contains_key("authorization"));
     assert!(!request.headers.contains_key("cookie"));
-    let _ = request.reply(200, b"redirected");
+    drop(request.reply(200, b"redirected"));
     assert_eq!(get.await.unwrap().unwrap(), b"redirected");
 }
 
@@ -639,10 +641,10 @@ async fn unflattened_list_preserves_capture_order_duplicates_and_empty_capture()
         let storage = storage.clone();
         tokio::spawn(async move { storage.list("prefix").await })
     };
-    let _ = server.next().await.reply(
+    drop(server.next().await.reply(
         200,
         b"<name>second</name><name>first</name><name>second</name><name></name>",
-    );
+    ));
     assert_eq!(
         list.await
             .unwrap()

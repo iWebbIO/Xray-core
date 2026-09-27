@@ -588,13 +588,14 @@ async fn tcp_query_uses_exact_length_framing_and_short_reads() {
 
 #[tokio::test]
 async fn truncated_partial_udp_reply_can_retry_over_tcp() {
-    // TCP and UDP ephemeral/excluded ranges can differ on Windows. Reserve
-    // both protocols before accepting this OS-selected test port.
+    // TCP and UDP ephemeral/excluded ranges can differ on Windows; only the
+    // UDP allocator reliably avoids the UDP-excluded ranges, so pick the port
+    // with a UDP bind first and then reserve TCP on the same port.
     let mut pair = None;
     for attempt in 0..64 {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        match UdpSocket::bind(listener.local_addr().unwrap()).await {
-            Ok(socket) => {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        match TcpListener::bind(socket.local_addr().unwrap()).await {
+            Ok(listener) => {
                 pair = Some((listener, socket));
                 break;
             }

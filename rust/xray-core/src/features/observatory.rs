@@ -1204,14 +1204,15 @@ mod tests {
         cancel.cancel();
         task.await.unwrap().unwrap();
         assert!(!observer.is_running());
-        let calls = connector.calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(
-            (&calls[0].0, &calls[1].0),
-            (&"a".to_owned(), &"b".to_owned())
-        );
-        assert!(calls[1].2.duration_since(calls[0].2) >= Duration::from_millis(20));
-        drop(calls);
+        {
+            let calls = connector.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(
+                (&calls[0].0, &calls[1].0),
+                (&"a".to_owned(), &"b".to_owned())
+            );
+            assert!(calls[1].2.duration_since(calls[0].2) >= Duration::from_millis(20));
+        }
         connector.finish().await;
     }
 

@@ -327,6 +327,8 @@ mod tests {
         use std::time::Duration;
         use tokio::net::UdpSocket;
 
+        use std::net::Ipv4Addr;
+
         let blackhole = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let destination = Destination::from(blackhole.local_addr().unwrap());
         // The ordinary configuration has an eight-second termination linger.
@@ -344,8 +346,12 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(source, bound);
+        // Winsock permits a specific-address bind over another socket's
+        // wildcard bind, so only the exact wildcard re-bind proves the driver
+        // still holds the port while the stream is alive.
+        let held = SocketAddr::from((Ipv4Addr::UNSPECIFIED, bound.port()));
         assert!(
-            matches!(UdpSocket::bind(bound).await, Err(error) if error.kind() == io::ErrorKind::AddrInUse)
+            matches!(UdpSocket::bind(held).await, Err(error) if error.kind() == io::ErrorKind::AddrInUse)
         );
         drop(stream);
         let rebound = tokio::time::timeout(Duration::from_millis(800), async {

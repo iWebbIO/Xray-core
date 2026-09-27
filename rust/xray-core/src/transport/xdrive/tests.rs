@@ -70,11 +70,11 @@ impl Storage for MemoryStorage {
     fn get<'a>(&'a self, name: &'a str) -> StorageFuture<'a, Vec<u8>> {
         Box::pin(async move {
             self.get_count.fetch_add(1, Ordering::Relaxed);
-            if let Some(count) = self.missing_gets.lock().unwrap().get_mut(name) {
-                if *count > 0 {
-                    *count -= 1;
-                    return Err(io::Error::new(io::ErrorKind::NotFound, "not yet visible"));
-                }
+            if let Some(count) = self.missing_gets.lock().unwrap().get_mut(name)
+                && *count > 0
+            {
+                *count -= 1;
+                return Err(io::Error::new(io::ErrorKind::NotFound, "not yet visible"));
             }
             self.objects
                 .lock()

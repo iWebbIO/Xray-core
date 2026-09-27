@@ -165,10 +165,7 @@ impl Echo {
                                         io::ErrorKind::WouldBlock
                                             | io::ErrorKind::TimedOut
                                             | io::ErrorKind::Interrupted
-                                    ) =>
-                                {
-                                    ()
-                                }
+                                    ) => {}
                                 Err(error) => return Err(error),
                             }
                         }

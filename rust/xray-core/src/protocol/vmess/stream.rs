@@ -440,6 +440,88 @@ impl AsyncRead for VmessStream {
     }
 }
 
+impl AsyncWrite for VmessStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if let Some(error) = this.stored_error() {
+            return Poll::Ready(Err(error));
+        }
+        if this.shutdown != Shutdown::Open {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "VMess write side is shut down",
+            )));
+        }
+        if input.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        this.output_started = true;
+        match this.poll_drain(cx) {
+            Poll::Ready(Ok(())) => (),
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
+        let count = input.len().min(this.encoder.max_payload_length());
+        this.write_wire = match this.encoder.encode_frame(&input[..count]) {
+            Ok(wire) => wire,
+            Err(error) => return Poll::Ready(Err(this.invalid(error))),
+        };
+        // The plaintext is now accepted even if only a ciphertext prefix fits
+        // into the transport. Returning Pending here would let cancellation or
+        // a different retry buffer duplicate/replace accepted plaintext.
+        if let Poll::Ready(Err(error)) = this.poll_drain(cx) {
+            return Poll::Ready(Err(error));
+        }
+        Poll::Ready(Ok(count))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if let Some(error) = this.stored_error() {
+            return Poll::Ready(Err(error));
+        }
+        this.output_started = true;
+        this.poll_flush_output(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if let Some(error) = this.stored_error() {
+            return Poll::Ready(Err(error));
+        }
+        if this.shutdown == Shutdown::Done {
+            return Poll::Ready(Ok(()));
+        }
+        this.output_started = true;
+        if this.shutdown == Shutdown::Open {
+            // Freeze writes as soon as shutdown is requested, and append exactly
+            // one EOF after any partially written data/header bytes.
+            let eof = match this.encoder.encode_frame(&[]) {
+                Ok(wire) => wire,
+                Err(error) => return Poll::Ready(Err(this.invalid(error))),
+            };
+            this.write_wire.extend_from_slice(&eof);
+            this.shutdown = Shutdown::EofQueued;
+        }
+        match this.poll_flush_output(cx) {
+            Poll::Ready(Ok(())) => (),
+            result => return result,
+        }
+        match Pin::new(&mut this.inner).poll_shutdown(cx) {
+            Poll::Ready(Ok(())) => {
+                this.shutdown = Shutdown::Done;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(this.fail(error))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,87 +1031,5 @@ mod tests {
         wire.pop();
         let mut client = malformed_response_reader(&request, &wire).await;
         assert!(client.read_to_end(&mut Vec::new()).await.is_err());
-    }
-}
-
-impl AsyncWrite for VmessStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        input: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        if let Some(error) = this.stored_error() {
-            return Poll::Ready(Err(error));
-        }
-        if this.shutdown != Shutdown::Open {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "VMess write side is shut down",
-            )));
-        }
-        if input.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        this.output_started = true;
-        match this.poll_drain(cx) {
-            Poll::Ready(Ok(())) => (),
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Pending => return Poll::Pending,
-        }
-        let count = input.len().min(this.encoder.max_payload_length());
-        this.write_wire = match this.encoder.encode_frame(&input[..count]) {
-            Ok(wire) => wire,
-            Err(error) => return Poll::Ready(Err(this.invalid(error))),
-        };
-        // The plaintext is now accepted even if only a ciphertext prefix fits
-        // into the transport. Returning Pending here would let cancellation or
-        // a different retry buffer duplicate/replace accepted plaintext.
-        if let Poll::Ready(Err(error)) = this.poll_drain(cx) {
-            return Poll::Ready(Err(error));
-        }
-        Poll::Ready(Ok(count))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if let Some(error) = this.stored_error() {
-            return Poll::Ready(Err(error));
-        }
-        this.output_started = true;
-        this.poll_flush_output(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if let Some(error) = this.stored_error() {
-            return Poll::Ready(Err(error));
-        }
-        if this.shutdown == Shutdown::Done {
-            return Poll::Ready(Ok(()));
-        }
-        this.output_started = true;
-        if this.shutdown == Shutdown::Open {
-            // Freeze writes as soon as shutdown is requested, and append exactly
-            // one EOF after any partially written data/header bytes.
-            let eof = match this.encoder.encode_frame(&[]) {
-                Ok(wire) => wire,
-                Err(error) => return Poll::Ready(Err(this.invalid(error))),
-            };
-            this.write_wire.extend_from_slice(&eof);
-            this.shutdown = Shutdown::EofQueued;
-        }
-        match this.poll_flush_output(cx) {
-            Poll::Ready(Ok(())) => (),
-            result => return result,
-        }
-        match Pin::new(&mut this.inner).poll_shutdown(cx) {
-            Poll::Ready(Ok(())) => {
-                this.shutdown = Shutdown::Done;
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(error)) => Poll::Ready(Err(this.fail(error))),
-            Poll::Pending => Poll::Pending,
-        }
     }
 }

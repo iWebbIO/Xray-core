@@ -307,14 +307,16 @@ async fn accept_loop(
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error),
                 };
-                let inbound = inbound.clone();
-                let tag = tag.clone();
+                let context = ConnectionContext {
+                    inbound: inbound.clone(),
+                    tag: tag.clone(),
+                    dispatcher: dispatcher.clone(),
+                    cancel: cancel.clone(),
+                };
                 let transport = transport.clone();
-                let dispatcher = dispatcher.clone();
-                let cancel = cancel.clone();
                 sessions.spawn(async move {
-                    let log_tag = tag.clone();
-                    if let Err(error) = handle_connection(stream, source, bound, inbound, tag, dispatcher, transport, cancel).await {
+                    let log_tag = context.tag.clone();
+                    if let Err(error) = handle_connection(stream, source, bound, transport, context).await {
                         tracing::debug!(inbound = %log_tag, %source, error = %format!("{error:#}"), "connection closed");
                     }
                 });
@@ -332,16 +334,28 @@ async fn accept_loop(
     result.and(close_result)
 }
 
+/// Per-connection inbound plumbing shared by every accepted transport stream.
+#[derive(Clone)]
+struct ConnectionContext {
+    inbound: Arc<Inbound>,
+    tag: Arc<str>,
+    dispatcher: Arc<Dispatcher>,
+    cancel: CancellationToken,
+}
+
 async fn handle_connection(
     stream: BoxStream,
     source: SocketAddr,
     bound: SocketAddr,
-    inbound: Arc<Inbound>,
-    tag: Arc<str>,
-    dispatcher: Arc<Dispatcher>,
     transport: Arc<InboundTransport>,
-    cancel: CancellationToken,
+    context: ConnectionContext,
 ) -> Result<()> {
+    let ConnectionContext {
+        inbound,
+        tag,
+        dispatcher,
+        cancel,
+    } = context;
     let accepted = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
         accepted = transport.accept(stream) => accepted?,
@@ -418,7 +432,13 @@ async fn handle_stream(
                 unreachable!("only SOCKS can associate UDP")
             };
             return udp_integration::serve(
-                stream, request, settings, source, bound, tag, dispatcher, cancel,
+                stream,
+                request,
+                settings,
+                udp_integration::ConnectionEnds { source, bound },
+                tag,
+                dispatcher,
+                cancel,
             )
             .await;
         }

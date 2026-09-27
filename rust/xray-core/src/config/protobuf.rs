@@ -1110,6 +1110,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(invalid_from_utf8)] // deliberately asserting the binary fixture is not UTF-8
     fn real_go_binary_fixture_validates_and_preserves_binary_data() {
         let bytes = include_bytes!("../../../fixtures/protobuf/basic.pb");
         assert!(std::str::from_utf8(bytes).is_err());

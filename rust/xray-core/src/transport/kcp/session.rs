@@ -731,7 +731,7 @@ mod tests {
         a.send_next = u32::MAX;
         a.remote_window = 31;
         b.receive_next = u32::MAX;
-        a.queue(&vec![7; 92]).unwrap();
+        a.queue(&[7; 92]).unwrap();
         let packets = data_packets(&mut a, start);
         assert_eq!(packets.len(), 2);
         b.input_datagram(start, &packets[1]).unwrap();
@@ -851,11 +851,11 @@ mod tests {
             for (to_b, packets) in [(true, a.poll(now).unwrap()), (false, b.poll(now).unwrap())] {
                 for packet in packets {
                     serial += 1;
-                    if serial % 5 == 0 {
+                    if serial.is_multiple_of(5) {
                         continue;
                     }
                     let deadline = now + (serial * 13) % 80;
-                    if serial % 11 == 0 {
+                    if serial.is_multiple_of(11) {
                         network.push((deadline + 3, to_b, packet.clone()));
                     }
                     network.push((deadline, to_b, packet));
@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn duplicate_stale_acks_do_not_free_twice_or_regress_window() {
         let mut a = Session::new(7, small(), 0).unwrap();
-        a.queue(&vec![1; 138]).unwrap();
+        a.queue(&[1; 138]).unwrap();
         let _ = a.poll(0).unwrap();
         let ack = Segment::Ack {
             conv: 7,

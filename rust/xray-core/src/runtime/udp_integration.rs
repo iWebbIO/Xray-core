@@ -59,16 +59,23 @@ pub(super) fn dispatcher(
     Ok(Arc::new(dispatcher))
 }
 
+/// Peer and locally bound addresses of one accepted inbound connection.
+#[derive(Clone, Copy)]
+pub(super) struct ConnectionEnds {
+    pub(super) source: SocketAddr,
+    pub(super) bound: SocketAddr,
+}
+
 pub(super) async fn serve(
     mut control: BoxStream,
     request: AssociateRequest,
     settings: &SocksSettings,
-    source: SocketAddr,
-    bound: SocketAddr,
+    ends: ConnectionEnds,
     tag: &str,
     dispatcher: &Dispatcher,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    let ConnectionEnds { source, bound } = ends;
     let policy = dispatcher.policy.for_level(0);
     ensure!(
         !policy.timeouts.connection_idle.is_zero(),
