@@ -24,11 +24,18 @@ const CRLF: [u8; 2] = *b"\r\n";
 pub struct Account {
     key: [u8; 56],
     pub email: String,
+    /// The user's policy level (Go's account Level).
+    pub level: u32,
 }
 
 impl Account {
     /// Compile a password once, matching Go's `hexSha224` byte for byte.
     pub fn new(password: &str, email: impl Into<String>) -> Self {
+        Self::with_level(password, email, 0)
+    }
+
+    /// Compile a password with the account's policy level.
+    pub fn with_level(password: &str, email: impl Into<String>, level: u32) -> Self {
         let digest = Sha224::digest(password.as_bytes());
         let mut key = [0; 56];
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -39,6 +46,7 @@ impl Account {
         Self {
             key,
             email: email.into(),
+            level,
         }
     }
 }
@@ -110,6 +118,7 @@ pub async fn read_request<R: AsyncRead + Unpin>(
         request: Request {
             destination,
             user: account.email.clone(),
+            level: account.level,
             initial_payload: Vec::new(),
             reply: Reply::None,
         },

@@ -81,6 +81,8 @@ pub struct Account {
     /// Per-user flow: empty, or one of the two Vision spellings
     /// (`xtls-rprx-vision`, `xtls-rprx-vision-udp443`).
     pub flow: String,
+    /// The user's policy level (Go's account Level).
+    pub level: u32,
 }
 
 /// One authenticated inbound request plus the validated flow addon and the
@@ -172,6 +174,7 @@ pub async fn read_request<R: AsyncRead + Unpin>(
         request: Request {
             destination,
             user: account.email.clone(),
+            level: account.level,
             initial_payload: Vec::new(),
             reply: Reply::Vless,
         },
@@ -639,6 +642,7 @@ mod tests {
             id: ID,
             email: "test@example.com".to_owned(),
             flow: String::new(),
+            level: 0,
         }
     }
 

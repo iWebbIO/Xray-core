@@ -609,6 +609,9 @@ pub enum Inbound {
         /// field means TCP only, exactly like Go's nil NetworkList.
         udp: bool,
     },
+    /// The DNS proxy inbound: a terminal handler answering DNS queries (and
+    /// optionally forwarding non-DNS streams).
+    Dns(crate::protocol::dns_proxy::DnsProxySettings),
 }
 
 #[derive(Clone, Debug)]
@@ -662,6 +665,13 @@ pub enum Outbound {
     },
     Wireguard {
         settings: crate::protocol::wireguard::WireGuardConfig,
+    },
+    Dns {
+        settings: crate::protocol::dns_proxy::DnsProxySettings,
+    },
+    /// Go registers loopback as an outbound only; the inbound arm rejects it.
+    Loopback {
+        settings: crate::protocol::loopback::LoopbackSettings,
     },
 }
 
@@ -885,7 +895,6 @@ impl Config {
                     let settings: FreedomSettings = serde_json::from_value(raw.settings.clone()).context("freedom settings")?;
                     let strategy = if settings.target_strategy.is_empty() { &settings.domain_strategy } else { &settings.target_strategy };
                     let strategy = crate::protocol::freedom::DomainStrategy::parse(strategy)?;
-                    ensure!(settings.user_level == 0, "user policy levels are not migrated yet");
                     Outbound::Freedom { strategy, redirect: if settings.redirect.is_empty() { None } else { Some(Destination::parse_authority(&settings.redirect, None)?) }, final_rules: crate::protocol::freedom::FinalRules::compile(&settings.final_rules)? }
                 }
                 "block" | "blackhole" => {
@@ -912,6 +921,22 @@ impl Config {
                     )?;
                     let server = settings.server_destination()?;
                     Outbound::Masque { settings, server }
+                }
+                "dns" => {
+                    let settings = crate::protocol::dns_proxy::DnsProxySettings::from_value(
+                        &raw.settings,
+                    )
+                    .context("dns outbound settings")?;
+                    crate::protocol::dns_proxy::DnsProxy::compile(&settings)
+                        .context("dns outbound settings")?;
+                    Outbound::Dns { settings }
+                }
+                "loopback" => {
+                    let settings = crate::protocol::loopback::LoopbackSettings::from_value(
+                        &raw.settings,
+                    )
+                    .context("loopback outbound settings")?;
+                    Outbound::Loopback { settings }
                 }
                 "wireguard" => {
                     let settings: crate::protocol::wireguard::WireGuardConfig =
@@ -998,10 +1023,6 @@ pub(crate) fn compile_inbound(
                 matches!(settings.auth.as_str(), "" | "noauth" | "password"),
                 "unknown SOCKS authentication method"
             );
-            ensure!(
-                settings.user_level == 0,
-                "user policy levels are not migrated yet"
-            );
             if !settings.accounts.is_empty() {
                 settings.users = None;
             }
@@ -1027,10 +1048,6 @@ pub(crate) fn compile_inbound(
             let mut settings: HttpSettings =
                 serde_json::from_value(raw.settings.clone()).context("HTTP inbound settings")?;
             ensure!(
-                settings.user_level == 0,
-                "user policy levels are not migrated yet"
-            );
-            ensure!(
                 !settings.allow_transparent,
                 "transparent HTTP is not migrated yet"
             );
@@ -1048,10 +1065,6 @@ pub(crate) fn compile_inbound(
             ensure!(
                 !settings.follow_redirect,
                 "transparent socket redirection is not migrated yet"
-            );
-            ensure!(
-                settings.user_level == 0,
-                "user policy levels are not migrated yet"
             );
             let network = settings
                 .network
@@ -1079,6 +1092,16 @@ pub(crate) fn compile_inbound(
         }
         "vless" | "trojan" | "shadowsocks" => proxies::inbound(&raw.protocol, &raw.settings)?,
         "vmess" => vmess::inbound(&raw.settings)?,
+        "dns" => {
+            let settings = crate::protocol::dns_proxy::DnsProxySettings::from_value(&raw.settings)
+                .context("dns inbound settings")?;
+            crate::protocol::dns_proxy::DnsProxy::compile(&settings)
+                .context("dns inbound settings")?;
+            Inbound::Dns(settings)
+        }
+        "loopback" => {
+            bail!("loopback is an outbound protocol only; Go registers no loopback inbound")
+        }
         other => bail!("inbound protocol {other:?} is not migrated yet"),
     };
     Ok((inbound, transport))
@@ -1167,6 +1190,36 @@ mod tests {
         )
         .unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn user_policy_levels_parse_across_proxies() {
+        // Non-zero user levels are accepted everywhere Go accepts them; the
+        // runtime selects the session policy through the request's level.
+        let cases = [
+            (
+                "vless",
+                r#"{"decryption":"none","clients":[{"id":"example","level":3}]}"#,
+            ),
+            ("trojan", r#"{"clients":[{"password":"pw","level":3}]}"#),
+            (
+                "shadowsocks",
+                r#"{"method":"aes-256-gcm","password":"pw","level":3}"#,
+            ),
+            (
+                "shadowsocks",
+                r#"{"method":"2022-blake3-aes-256-gcm","password":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","level":3}"#,
+            ),
+        ];
+        for (protocol, settings) in cases {
+            let config = Config::from_json(&format!(
+                r#"{{"inbounds":[{{"listen":"127.0.0.1","port":1080,"protocol":"{protocol}","settings":{settings}}}],"outbounds":[{{"protocol":"freedom"}}]}}"#
+            ))
+            .unwrap_or_else(|error| panic!("{protocol}: {error:#}"));
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("{protocol}: {error:#}"));
+        }
     }
 
     #[test]

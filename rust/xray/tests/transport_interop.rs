@@ -96,6 +96,7 @@ fn account() -> vless::Account {
             .as_bytes(),
         email: "transport-interop@xray.test".into(),
         flow: String::new(),
+        level: 0,
     }
 }
 

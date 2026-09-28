@@ -125,6 +125,7 @@ fn account() -> vless::Account {
         id: *parse_id("mux-user").unwrap().as_bytes(),
         email: String::new(),
         flow: String::new(),
+        level: 0,
     }
 }
 

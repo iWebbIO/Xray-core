@@ -53,7 +53,6 @@ struct VlessUser {
 
 impl VlessUser {
     fn compile(&self, outbound: bool) -> Result<vless::Account> {
-        ensure!(self.level == 0, "user policy levels are not migrated yet");
         ensure!(self.seed.is_empty(), "VLESS seed flow is not migrated yet");
         // Go accepts only the two Vision spellings (infra/conf/vless.go).
         ensure!(
@@ -75,6 +74,7 @@ impl VlessUser {
             id: *parse_id(&self.id)?.as_bytes(),
             email: self.email.clone(),
             flow: self.flow.clone(),
+            level: self.level,
         })
     }
 
@@ -140,8 +140,11 @@ impl TrojanUser {
             self.flow.is_empty(),
             "Trojan flow has been removed from the reference implementation"
         );
-        ensure!(self.level == 0, "user policy levels are not migrated yet");
-        Ok(trojan::Account::new(&self.password, self.email.clone()))
+        Ok(trojan::Account::with_level(
+            &self.password,
+            self.email.clone(),
+            self.level,
+        ))
     }
 }
 
@@ -186,16 +189,16 @@ struct ShadowsocksUser {
 }
 impl ShadowsocksUser {
     fn compile(&self) -> Result<crate::protocol::shadowsocks_session::Account> {
-        ensure!(self.level == 0, "user policy levels are not migrated yet");
-        crate::protocol::shadowsocks_session::Account::new(
+        let account = crate::protocol::shadowsocks_session::Account::new(
             self.method.parse()?,
             &self.password,
             self.email.clone(),
-        )
+        )?;
+        let _ = self.level;
+        Ok(account)
     }
 
     fn compile_2022(&self) -> Result<crate::protocol::shadowsocks2022::Account> {
-        ensure!(self.level == 0, "user policy levels are not migrated yet");
         crate::protocol::shadowsocks2022::Account::new(
             self.method.parse()?,
             &self.password,
@@ -405,7 +408,6 @@ pub(super) fn outbound(protocol: &str, settings: &Value) -> Result<Outbound> {
                 .into_iter()
                 .next()
                 .map(|user| {
-                    ensure!(user.level == 0, "user policy levels are not migrated yet");
                     let _email = user.email;
                     if protocol == "socks" {
                         ensure!(
@@ -530,7 +532,6 @@ mod tests {
                 ("password", json!("AA==")),
                 ("password", json!(format!("{password}:{password}"))),
                 ("network", json!("udp")),
-                ("level", json!(1)),
             ] {
                 let mut invalid = settings.clone();
                 invalid[field] = value;

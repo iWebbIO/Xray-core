@@ -2032,13 +2032,31 @@ mod tests {
         let task_observer = observer.clone();
         let task = tokio::spawn(async move { task_observer.run(selector, &task_cancel).await });
         // Initial round probes both tags; the first scheduled round selects
-        // only node-a and cleans node-b up.
+        // only node-a and cleans node-b up. The fourth call can still be
+        // mid-flight when the count unblocks, so poll the live observer
+        // (under the paused clock, sleeps advance time for the probe to
+        // finish and record) until the scheduled round's result lands.
         connector.calls_at_least(4).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = observer.snapshot();
+            if snapshot.status.len() == 1
+                && snapshot.status[0].outbound_tag == "node-a"
+                && snapshot.status[0].alive
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "cleanup never recorded the scheduled round: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
         cancel.cancel();
         task.await.unwrap().unwrap();
-        let snapshot = observer.snapshot();
-        assert_eq!(snapshot.status.len(), 1);
-        assert_eq!(snapshot.status[0].outbound_tag, "node-a");
-        assert!(snapshot.status[0].alive);
+        let settled = observer.snapshot();
+        assert_eq!(settled.status.len(), 1);
+        assert_eq!(settled.status[0].outbound_tag, "node-a");
+        assert!(settled.status[0].alive);
     }
 }

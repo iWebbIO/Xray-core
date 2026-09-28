@@ -472,6 +472,7 @@ async fn private_target_default_never_dials_and_shutdown_cancels_blackhole() {
             id: *xray_core::user::parse_id("example").unwrap().as_bytes(),
             email: String::new(),
             flow: String::new(),
+            level: 0,
         };
         xray_core::protocol::vless::write_request(
             &mut stream,
@@ -510,7 +511,7 @@ async fn configured_policy_statistics_and_access_file_follow_real_traffic() {
         let server=Server::start(serde_json::from_value(value).unwrap()).await.unwrap();
         let stats=server.stats().unwrap();
         let stream=TcpStream::connect(server.local_addresses()[0]).await.unwrap();
-        let account=xray_core::protocol::vless::Account{id:*xray_core::user::parse_id("example").unwrap().as_bytes(),email:String::new(),flow:String::new()};
+        let account=xray_core::protocol::vless::Account{id:*xray_core::user::parse_id("example").unwrap().as_bytes(),email:String::new(),flow:String::new(),level:0};
         let mut stream=stream;
         xray_core::protocol::vless::write_request(&mut stream,&account,&Destination::from(target.address)).await.unwrap();
         let mut stream=xray_core::protocol::vless::VlessStream::new(stream);

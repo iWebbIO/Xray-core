@@ -316,6 +316,7 @@ async fn dispatch_bridge_session(
     let request = Request {
         destination: target,
         user: String::new(),
+        level: 0,
         initial_payload: Vec::new(),
         reply: Reply::None,
     };

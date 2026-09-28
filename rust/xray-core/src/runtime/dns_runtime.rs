@@ -40,6 +40,85 @@ pub(super) fn resolver(app: Arc<DnsApp>) -> Arc<dyn super::udp_routing::UdpResol
     Arc::new(AppResolver(app))
 }
 
+// ---------------------------------------------------------------------------
+// DNS proxy seams (the dns inbound/outbound over DnsApp + the dialer)
+// ---------------------------------------------------------------------------
+
+/// `DnsQuery` over the configured DNS app (Go's dns.Client).
+pub(super) struct DnsAppQuery(pub Arc<crate::dns::app::DnsApp>);
+
+impl crate::protocol::dns_proxy::DnsQuery for DnsAppQuery {
+    fn lookup(
+        &self,
+        domain: &str,
+        ipv4: bool,
+        ipv6: bool,
+    ) -> crate::protocol::dns_proxy::DnsLookupFuture {
+        let app = self.0.clone();
+        let domain = domain.to_owned();
+        Box::pin(async move {
+            let options = if ipv4 && !ipv6 {
+                crate::dns::QueryOptions::IPV4
+            } else if ipv6 && !ipv4 {
+                crate::dns::QueryOptions::IPV6
+            } else {
+                crate::dns::QueryOptions::default()
+            };
+            let result = app
+                .lookup_ip(&domain, options)
+                .await
+                .map_err(std::io::Error::other)?;
+            // Go's ErrEmptyResponse answers an empty NOERROR, not an error.
+            Ok(result.ips)
+        })
+    }
+}
+
+/// `DnsForwardDial` over the runtime's outbound establish path (Go's
+/// internet.Dialer.Dial for the rewrite server).
+pub(super) struct RuntimeDial(pub Arc<super::Dispatcher>);
+
+impl crate::protocol::dns_proxy::DnsForwardDial for RuntimeDial {
+    fn dial_forward(
+        &self,
+        destination: &crate::address::Destination,
+    ) -> crate::protocol::dns_proxy::DnsDialFuture {
+        let dispatcher = self.0.clone();
+        let destination = destination.clone();
+        Box::pin(async move {
+            let (selected, _routed) =
+                dispatcher
+                    .router
+                    .select_with_route(&crate::router::RouteContext {
+                        destination: &destination,
+                        source: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+                        inbound_tag: "dns",
+                        user: "",
+                        network: "tcp",
+                    });
+            let outbound = dispatcher
+                .outbounds
+                .get(selected)
+                .ok_or_else(|| std::io::Error::other("dns forward selected a missing outbound"))?;
+            let transport = dispatcher
+                .transports
+                .get(selected)
+                .ok_or_else(|| std::io::Error::other("dns forward transport is missing"))?;
+            let (stream, _) = super::establish(
+                &dispatcher,
+                outbound,
+                transport,
+                &destination,
+                None,
+                Default::default(),
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+            Ok(stream)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

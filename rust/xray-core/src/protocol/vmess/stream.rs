@@ -108,6 +108,7 @@ pub async fn accept(
     Ok((
         Box::new(session),
         Request {
+            level: 0,
             destination,
             user,
             initial_payload: Vec::new(),

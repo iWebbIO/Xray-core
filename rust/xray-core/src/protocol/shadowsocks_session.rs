@@ -97,6 +97,7 @@ pub async fn accept(stream: BoxStream, account: &Account) -> Result<(BoxStream, 
     let writer = AeadWriter::from_key(write, account.kind, &account.key)?;
     account.admit_salt(writer.salt())?;
     let request = Request {
+        level: 0,
         destination,
         user: account.email.clone(),
         initial_payload: Vec::new(),

@@ -81,6 +81,7 @@ async fn handshake4<S: AsyncRead + AsyncWrite + Unpin>(
         bail!("unsupported SOCKS4 command {command}");
     }
     Ok(Request {
+        level: 0,
         destination: Destination::new(&host, port)?,
         user: String::new(),
         initial_payload: vec![],
@@ -155,6 +156,7 @@ async fn handshake5<S: AsyncRead + AsyncWrite + Unpin>(
         }));
     }
     Ok(Handshake::Connect(Request {
+        level: 0,
         destination,
         user,
         initial_payload: vec![],

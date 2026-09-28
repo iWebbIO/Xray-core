@@ -1,3 +1,4 @@
+pub mod dns_proxy;
 pub mod dokodemo_udp;
 pub mod freedom;
 pub mod freedom_dialer;
@@ -30,6 +31,8 @@ pub mod wireguard_netstack;
 use crate::address::Destination;
 
 pub struct Request {
+    /// The authenticated user's policy level (selects timeouts/stats).
+    pub level: u32,
     pub destination: Destination,
     pub user: String,
     pub initial_payload: Vec<u8>,

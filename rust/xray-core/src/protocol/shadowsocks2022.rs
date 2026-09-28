@@ -215,6 +215,7 @@ pub async fn accept(mut stream: BoxStream, account: &Account) -> Result<(BoxStre
     let (destination, initial) = codec::parse_request_variable(&variable).await?;
     account.admit_received(&salt)?; // Unauthenticated salts cannot poison the cache.
     let request = Request {
+        level: 0,
         destination,
         user: account.email.clone(),
         initial_payload: Vec::new(),

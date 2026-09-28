@@ -69,6 +69,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
     if method == "CONNECT" {
         return Ok(Request {
+            level: 0,
             destination: Destination::parse_authority(target, Some(443))?,
             user,
             initial_payload: bytes[head_len..].to_vec(),
@@ -130,6 +131,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     output.extend_from_slice(b"\r\n");
     output.extend_from_slice(&bytes[head_len..]);
     Ok(Request {
+        level: 0,
         destination,
         user,
         initial_payload: output,

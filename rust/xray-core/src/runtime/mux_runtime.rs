@@ -410,6 +410,7 @@ async fn serve_session(
         let request = Request {
             destination: session.target.destination(),
             user,
+            level: 0,
             initial_payload: Vec::new(),
             reply: crate::protocol::Reply::None,
         };
@@ -435,7 +436,6 @@ async fn serve_session(
             cancel,
             request,
             None,
-            dispatcher.policy.for_level(0),
             sniff,
         )
         .await;

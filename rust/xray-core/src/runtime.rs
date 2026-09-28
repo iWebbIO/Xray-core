@@ -75,8 +75,10 @@ struct Dispatcher {
     /// (Go's two ClientManagers per mux-enabled outbound handler).
     mux: Vec<Option<mux_runtime::MuxOutbound>>,
     /// The FakeDNS engine: fake-pool destinations map back to their domain
-    /// before routing (Go's dispatcher IsIPInIPPool swap).
+    /// before routing (Go's dispatcher IsIPInIPool swap).
     fake_dns: Option<std::sync::Arc<crate::dns::fakedns::FakeDnsEngine>>,
+    /// The loopback dispatch seam (loopback outbounds re-enter here).
+    loopback: std::sync::OnceLock<Arc<dyn protocol::loopback::LoopbackDispatch>>,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -348,6 +350,7 @@ impl Server {
             masque: Default::default(),
             mux: mux_pools,
             fake_dns: compiled.fake_dns.clone(),
+            loopback: Default::default(),
         });
         for outbound_mux in dispatcher.mux.iter().flatten() {
             for pool in [&outbound_mux.tcp, &outbound_mux.xudp]
@@ -741,6 +744,22 @@ async fn handle_stream(
             true,
         );
     }
+    // The DNS inbound is terminal: it speaks DNS frames, not a proxy
+    // handshake, so it never produces a protocol::Request.
+    if let Inbound::Dns(settings) = inbound {
+        let proxy =
+            protocol::dns_proxy::DnsProxy::compile(settings).context("dns inbound settings")?;
+        return match dispatcher.dns.as_ref() {
+            Some(app) => {
+                let resolver = dns_runtime::DnsAppQuery(app.clone());
+                let dial = dns_runtime::RuntimeDial(dispatcher.clone());
+                proxy
+                    .serve_inbound(stream, Some(&resolver), &dial, cancel)
+                    .await
+            }
+            None => anyhow::bail!("dns proxy hijack requires a configured DNS app"),
+        };
+    }
     let (stream, handshake) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Ok(()),
@@ -773,7 +792,7 @@ async fn handle_stream(
         }
     };
     dispatch_request(
-        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy, sniff,
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, sniff,
     )
     .await
 }
@@ -796,7 +815,6 @@ async fn dispatch_request(
     cancel: &CancellationToken,
     request: protocol::Request,
     vision: Option<[u8; 16]>,
-    policy: crate::features::policy::SessionPolicy,
     sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 ) -> Result<()> {
     // A request whose destination address is v1.mux.cool turns the
@@ -842,7 +860,7 @@ async fn dispatch_request(
         };
     }
     dispatch_common(
-        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy, sniff,
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, sniff,
     )
     .await
 }
@@ -860,7 +878,6 @@ async fn dispatch_common(
     cancel: &CancellationToken,
     mut request: protocol::Request,
     vision: Option<[u8; 16]>,
-    policy: crate::features::policy::SessionPolicy,
     sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 ) -> Result<()> {
     // Go's dispatcher sniffs the connection before routing: the payload is
@@ -903,14 +920,22 @@ async fn dispatch_common(
             }
         }
     }
+    // The authenticated user's policy level selects the session policy
+    // (Go's PolicyManager.ForLevel over the user's account level); the
+    // caller's pre-auth handshake policy stays level zero.
+    let session_policy = dispatcher.policy.for_level(request.level);
     let exchange = async {
         let idle_since = Instant::now();
         anyhow::ensure!(
-            !policy.timeouts.connection_idle.is_zero(),
+            !session_policy.timeouts.connection_idle.is_zero(),
             "proxy session inactivity timeout"
         );
         let user_stats = dispatcher.stats.as_ref().map(|stats| {
-            stats.user_session(&request.user, &source_ip_string(source), policy.stats)
+            stats.user_session(
+                &request.user,
+                &source_ip_string(source),
+                session_policy.stats,
+            )
         });
         let (selected, routed) = dispatcher.router.select_with_route_sniffed(
             &RouteContext {
@@ -952,7 +977,7 @@ async fn dispatch_common(
             Blocked(Duration),
             Blackhole(&'a [u8]),
         }
-        let idle_deadline = idle_since + policy.timeouts.connection_idle;
+        let idle_deadline = idle_since + session_policy.timeouts.connection_idle;
         // A bridge-domain destination is a reverse carrier the bridge dialed:
         // the portal takes the whole connection before routing (Go's isDomain
         // check in app/reverse/portal.go HandleConnection).
@@ -969,6 +994,46 @@ async fn dispatch_common(
                 }) => result.context("reverse carrier timed out")?,
             };
         }
+        // The dns and loopback outbounds own their relays (Go's
+        // Handler.Process / Loopback.Process): they bypass the establish
+        // path entirely, so they are served before the dispatch block.
+        if let Some(Outbound::Dns { settings }) = outbound {
+            let proxy = protocol::dns_proxy::DnsProxy::compile(settings)
+                .context("dns outbound settings")?;
+            let app_query = dispatcher
+                .dns
+                .as_ref()
+                .map(|app| dns_runtime::DnsAppQuery(app.clone()));
+            let dial = dns_runtime::RuntimeDial(dispatcher.clone());
+            request.reply.success(&mut stream, bound).await?;
+            record(true, String::new());
+            return proxy
+                .serve_outbound(
+                    stream,
+                    &request.destination,
+                    protocol::dns_proxy::Framing::Tcp,
+                    app_query
+                        .as_ref()
+                        .map(|query| query as &dyn protocol::dns_proxy::DnsQuery),
+                    &dial,
+                    cancel,
+                )
+                .await;
+        }
+        if let Some(Outbound::Loopback { settings }) = outbound {
+            let dispatch = dispatcher
+                .loopback
+                .get()
+                .context("loopback outbound requires the dispatch seam")?
+                .clone();
+            let loopback = protocol::loopback::Loopback::new(settings.clone(), dispatch);
+            request.reply.success(&mut stream, bound).await?;
+            record(true, String::new());
+            return loopback
+                .process(&request.destination, stream)
+                .await
+                .context("loopback outbound relay");
+        }
         // The authenticated session owns its policy and online guard during DNS,
         // dialing, outbound authentication, proxy replies and API queue backpressure.
         let dispatch = timeout_at(idle_deadline, async {
@@ -983,6 +1048,7 @@ async fn dispatch_common(
                     Inbound::Trojan { .. } => "trojan",
                     Inbound::Shadowsocks { .. } => "shadowsocks",
                     Inbound::Shadowsocks2022 { .. } => "shadowsocks-2022",
+                    Inbound::Dns(_) => "dns",
                 };
                 let admission = timeout(
                     DIAL_TIMEOUT,
@@ -1011,7 +1077,8 @@ async fn dispatch_common(
                     // Keep the client and user guard in this connection task. The
                     // API receives only the other end of the bounded relay, as Go's
                     // commander receives a connection backed by dispatcher pipes.
-                    let (upstream, service) = tokio::io::duplex(relay_buffer_size(policy.buffer));
+                    let (upstream, service) =
+                        tokio::io::duplex(relay_buffer_size(session_policy.buffer));
                     dispatcher
                         .api
                         .as_ref()
@@ -1164,7 +1231,7 @@ async fn dispatch_common(
                 crate::features::session::relay_with_idle_since(
                     &mut stream,
                     &mut upstream,
-                    &policy,
+                    &session_policy,
                     user_stats,
                     &[],
                     cancel,
@@ -1174,7 +1241,7 @@ async fn dispatch_common(
             }
             Dispatch::Blocked(delay) => {
                 let mut deadline = idle_deadline;
-                let mut buffer = vec![0; relay_buffer_size(policy.buffer)];
+                let mut buffer = vec![0; relay_buffer_size(session_policy.buffer)];
                 let drain = async {
                     loop {
                         let count = timeout_at(deadline, stream.read(&mut buffer)).await??;
@@ -1184,7 +1251,7 @@ async fn dispatch_common(
                         if let Some(stats) = &user_stats {
                             stats.traffic.add_uplink(count);
                         }
-                        deadline = Instant::now() + policy.timeouts.connection_idle;
+                        deadline = Instant::now() + session_policy.timeouts.connection_idle;
                     }
                     timeout_at(deadline, stream.shutdown()).await??;
                     Ok::<_, anyhow::Error>(())
@@ -1202,7 +1269,7 @@ async fn dispatch_common(
                         stats.traffic.add_downlink(count);
                     }
                     response = &response[count..];
-                    deadline = Instant::now() + policy.timeouts.connection_idle;
+                    deadline = Instant::now() + session_policy.timeouts.connection_idle;
                 }
                 timeout_at(deadline, stream.shutdown()).await??;
             }
@@ -1234,6 +1301,8 @@ async fn proxy_handshake(
 ) -> Result<(BoxStream, InboundHandshake)> {
     use protocol::socks::Handshake;
     let request = match inbound {
+        // The DNS inbound never reaches a proxy handshake.
+        Inbound::Dns(_) => unreachable!("the dns inbound is served before the handshake"),
         Inbound::Vmess(authenticator) => {
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
             return Ok((stream, InboundHandshake::Connect(request, None)));
@@ -1288,6 +1357,7 @@ async fn proxy_handshake(
         }
         Inbound::Dokodemo { destination, .. } => Request {
             destination: destination.clone(),
+            level: 0,
             user: String::new(),
             initial_payload: Vec::new(),
             reply: Reply::None,
@@ -1419,6 +1489,9 @@ async fn establish(
         | Outbound::Masque { server, .. } => server,
         Outbound::Blackhole { .. } | Outbound::Api => {
             anyhow::bail!("internal outbound cannot establish a remote stream")
+        }
+        Outbound::Dns { .. } | Outbound::Loopback { .. } => {
+            anyhow::bail!("the dns and loopback outbounds own their relays")
         }
         Outbound::Wireguard { settings } => {
             // One lazily-built engine per settings value, dialed through the

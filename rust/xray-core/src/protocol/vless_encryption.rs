@@ -774,6 +774,7 @@ mod tests {
             // The inner VLESS request header and body are encrypted by the
             // session in both directions.
             let account = vless::Account {
+                level: 0,
                 flow: String::new(),
                 id: [7; 16],
                 email: "known-user".into(),
