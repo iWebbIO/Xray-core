@@ -38,6 +38,9 @@ pub enum ServerLink {
     /// DNS-over-HTTPS / DNS-over-TLS; the client restores the caller's
     /// original query ID so the shared validation applies unchanged.
     Encrypted(std::sync::Arc<super::encrypted::EncryptedClient>),
+    /// Go's `fakedns` nameserver: leases fake pool addresses directly,
+    /// never touching the network.
+    FakeDns(std::sync::Arc<super::fakedns::FakeDnsEngine>),
 }
 
 impl std::fmt::Debug for ServerLink {
@@ -48,6 +51,7 @@ impl std::fmt::Debug for ServerLink {
                 .debug_tuple("Encrypted")
                 .field(&client.endpoint().host())
                 .finish_non_exhaustive(),
+            Self::FakeDns(_) => formatter.debug_tuple("FakeDns").finish_non_exhaustive(),
         }
     }
 }
@@ -206,6 +210,7 @@ impl Resolver {
         if config.servers.iter().any(|server| match server {
             ServerLink::Classic(upstream) => upstream.address.port() == 0,
             ServerLink::Encrypted(client) => client.endpoint().port() == 0,
+            ServerLink::FakeDns(_) => false,
         }) {
             return Err(DnsError::InvalidConfig("nameserver port is zero"));
         }
@@ -416,6 +421,31 @@ impl Resolver {
             let bytes = wire::encode_query(id, &question, self.inner.config.client_ip)?;
             let result = timeout(self.inner.config.timeout, async {
                 match server {
+                    ServerLink::FakeDns(engine) => {
+                        // The fake engine leases pool addresses for the
+                        // queried family with Go's TTL-1 answer; the round
+                        // trip through the wire encoder keeps the shared
+                        // answer extraction uniform.
+                        let ips = engine.fake_ip_for_domain(
+                            key.name.trim_end_matches('.'),
+                            key.record_type == RecordType::A,
+                            key.record_type == RecordType::AAAA,
+                        );
+                        if ips.is_empty() {
+                            Err(DnsError::EmptyResponse)
+                        } else {
+                            let wire = wire::encode_response(
+                                id,
+                                &question,
+                                &ips,
+                                super::fakedns::FAKE_DNS_TTL,
+                                0,
+                                None,
+                                512,
+                            )?;
+                            wire::decode(&wire)
+                        }
+                    }
                     ServerLink::Classic(upstream) => {
                         exchange(
                             *upstream,

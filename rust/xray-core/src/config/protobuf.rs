@@ -1117,7 +1117,7 @@ mod tests {
         let config = from_bytes(bytes).unwrap();
         config.validate().unwrap();
         assert_eq!(config.inbounds[0].listen.to_string(), "127.0.0.1");
-        assert_eq!(config.inbounds[0].port, 10800);
+        assert_eq!(config.inbounds[0].port.ports(), [10800]);
         assert_eq!(
             config.outbounds[1].settings["response"]["customResponseData"],
             "/wABgA=="

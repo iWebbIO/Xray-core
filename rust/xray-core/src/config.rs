@@ -35,6 +35,9 @@ pub struct Config {
     /// `features::observatory_burst::BurstObservatoryConfig::from_value`.
     #[serde(rename = "burstObservatory")]
     pub burst_observatory: Option<Value>,
+    /// The root `fakeDns` pools (Go's FakeDNSConfig).
+    #[serde(rename = "fakeDns")]
+    pub fake_dns: Option<crate::dns::fakedns::FakeDnsSettings>,
     pub inbounds: Vec<InboundConfig>,
     pub outbounds: Vec<OutboundConfig>,
     pub routing: RoutingConfig,
@@ -79,8 +82,7 @@ pub struct InboundConfig {
     pub tag: String,
     #[serde(default = "default_listen")]
     pub listen: IpAddr,
-    #[serde(deserialize_with = "port_value")]
-    pub port: u16,
+    pub port: PortSpec,
     pub protocol: String,
     #[serde(default = "empty_object")]
     pub settings: Value,
@@ -665,6 +667,9 @@ pub(crate) struct ValidatedConfig {
     pub outbound_transports: Vec<crate::transport::OutboundTransport>,
     /// Mux.Cool plans aligned with `outbounds` (None = no multiplexing).
     pub mux: Vec<Option<MuxPlan>>,
+    /// The FakeDNS engine (root `fakeDns`, or defaults when a fakedns
+    /// nameserver is configured).
+    pub fake_dns: Option<std::sync::Arc<crate::dns::fakedns::FakeDnsEngine>>,
     pub router: Router,
 }
 
@@ -675,20 +680,61 @@ fn empty_object() -> Value {
     serde_json::json!({})
 }
 
-fn port_value<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<u16, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    let parsed = match value {
-        Value::Number(n) => n.as_u64().and_then(|v| u16::try_from(v).ok()),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    };
-    parsed.ok_or_else(|| {
-        serde::de::Error::custom(
-            "expected a port number in 0..65535; port ranges are not migrated yet",
-        )
-    })
+/// Go's `PortList`: a port number, `"3000"`, or a `"3000-4000"` range; the
+/// runtime binds one listener per port.
+#[derive(Clone, Debug)]
+pub struct PortSpec(Vec<u16>);
+
+impl PortSpec {
+    pub fn ports(&self) -> &[u16] {
+        &self.0
+    }
+
+    /// A single-port spec (test/programmatic construction).
+    pub fn single(port: u16) -> Self {
+        Self(vec![port])
+    }
+}
+
+impl serde::Serialize for PortSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0.as_slice() {
+            [port] => port.serialize(serializer),
+            [first, rest @ ..] if !rest.is_empty() => {
+                format!("{first}-{}", rest[rest.len() - 1]).serialize(serializer)
+            }
+            _ => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PortSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let ports = match value {
+            Value::Number(n) => n
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .map(|port| vec![port]),
+            Value::String(text) => match text.split_once('-') {
+                None => text.parse::<u16>().ok().map(|port| vec![port]),
+                Some((start, end)) => match (start.parse::<u16>(), end.parse::<u16>()) {
+                    (Ok(start), Ok(end)) if start <= end => Some((start..=end).collect::<Vec<_>>()),
+                    _ => None,
+                },
+            },
+            _ => None,
+        };
+        ports.map(Self).ok_or_else(|| {
+            serde::de::Error::custom("expected a port number or \"a-b\" range within 0..65535")
+        })
+    }
 }
 
 impl Config {
@@ -729,11 +775,58 @@ impl Config {
             None => None,
         };
         // The DNS app is built eagerly so `xray run --test` reports server,
-        // hosts and strategy errors before any listener opens.
+        // hosts and strategy errors before any listener opens. A fakedns
+        // nameserver without a root object gets Go's strategy defaults.
+        let fakedns_in_use = self
+            .dns
+            .as_ref()
+            .and_then(|value| value.get("servers"))
+            .and_then(|servers| servers.as_array())
+            .is_some_and(|servers| {
+                servers.iter().any(|server| {
+                    let address = match server {
+                        Value::String(address) => address.clone(),
+                        Value::Object(options) => options
+                            .get("address")
+                            .and_then(|address| address.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                        _ => String::new(),
+                    };
+                    address.eq_ignore_ascii_case("fakedns")
+                })
+            });
+        let fake_dns_engine = match &self.fake_dns {
+            Some(settings) => Some(std::sync::Arc::new(
+                crate::dns::fakedns::FakeDnsEngine::new(settings)?,
+            )),
+            None if fakedns_in_use => {
+                let strategy = self
+                    .dns
+                    .as_ref()
+                    .and_then(|value| value.get("queryStrategy"))
+                    .and_then(|strategy| strategy.as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let (ipv4, ipv6) = match strategy.as_str() {
+                    "useipv4" | "useip4" => (true, false),
+                    "useipv6" | "useip6" => (false, true),
+                    _ => (true, true),
+                };
+                Some(std::sync::Arc::new(
+                    crate::dns::fakedns::FakeDnsEngine::new(
+                        &crate::dns::fakedns::FakeDnsSettings::defaults(ipv4, ipv6),
+                    )?,
+                ))
+            }
+            None => None,
+        };
         let dns = self
             .dns
             .as_ref()
-            .map(crate::dns::app::DnsApp::from_value)
+            .map(|value| {
+                crate::dns::app::DnsApp::from_value_with_fake_dns(value, fake_dns_engine.clone())
+            })
             .transpose()?
             .map(std::sync::Arc::new);
         let reverse = match &self.reverse {
@@ -750,6 +843,9 @@ impl Config {
             );
             let (inbound, transport) =
                 compile_inbound(raw).with_context(|| format!("inbound {:?}", raw.tag))?;
+            // Port 0 binds an ephemeral port (the OS assigns one), matching
+            // the runtime tests' convention; explicit ranges validate in the
+            // PortSpec parser.
             inbounds.push((raw.clone(), inbound, transport));
         }
         ensure!(
@@ -777,14 +873,14 @@ impl Config {
             };
             mux.push(plan);
             outbounds.push(match raw.protocol.as_str() {
-                "freedom" => {
+                "direct" | "freedom" => {
                     let settings: FreedomSettings = serde_json::from_value(raw.settings.clone()).context("freedom settings")?;
                     let strategy = if settings.target_strategy.is_empty() { &settings.domain_strategy } else { &settings.target_strategy };
                     let strategy = crate::protocol::freedom::DomainStrategy::parse(strategy)?;
                     ensure!(settings.user_level == 0, "user policy levels are not migrated yet");
                     Outbound::Freedom { strategy, redirect: if settings.redirect.is_empty() { None } else { Some(Destination::parse_authority(&settings.redirect, None)?) }, final_rules: crate::protocol::freedom::FinalRules::compile(&settings.final_rules)? }
                 }
-                "blackhole" => {
+                "block" | "blackhole" => {
                     let settings: BlackholeSettings = serde_json::from_value(raw.settings.clone()).context("blackhole settings")?;
                     let response = settings.response.unwrap_or_default();
                     let response = match response.r#type.to_ascii_lowercase().as_str() {
@@ -869,6 +965,7 @@ impl Config {
             outbounds,
             outbound_transports,
             mux,
+            fake_dns: fake_dns_engine,
             router,
         })
     }
@@ -885,7 +982,8 @@ pub(crate) fn compile_inbound(
     }
     let transport = raw.stream_settings.inbound_transport()?;
     let inbound = match raw.protocol.as_str() {
-        "socks" => {
+        // Go registers `mixed` as the SOCKS server config: same handler.
+        "mixed" | "socks" => {
             let mut settings: SocksSettings =
                 serde_json::from_value(raw.settings.clone()).context("SOCKS inbound settings")?;
             ensure!(
@@ -936,7 +1034,7 @@ pub(crate) fn compile_inbound(
             }
             Inbound::Http(settings)
         }
-        "dokodemo-door" => {
+        "tunnel" | "dokodemo-door" => {
             let settings: DokodemoSettings =
                 serde_json::from_value(raw.settings.clone()).context("dokodemo settings")?;
             ensure!(

@@ -127,10 +127,15 @@ fn ip_or_domain(address: IpAddr) -> IpOrDomain {
 fn receiver_settings(raw: &InboundConfig) -> ReceiverConfig {
     ReceiverConfig {
         port_list: Some(PortList {
-            range: vec![PortRange {
-                from: u32::from(raw.port),
-                to: u32::from(raw.port),
-            }],
+            range: raw
+                .port
+                .ports()
+                .iter()
+                .map(|port| PortRange {
+                    from: u32::from(*port),
+                    to: u32::from(*port),
+                })
+                .collect(),
         }),
         listen: Some(ip_or_domain(raw.listen)),
         ..Default::default()

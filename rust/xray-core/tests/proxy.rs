@@ -311,10 +311,10 @@ async fn bind_failure_rolls_back_previous_listeners() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let second = occupied.local_addr().unwrap();
         let mut config = config("socks", json!({}));
-        config.inbounds[0].port = first.port();
+        config.inbounds[0].port = xray_core::config::PortSpec::single(first.port());
         let mut next = config.inbounds[0].clone();
         next.tag = "conflicting".into();
-        next.port = second.port();
+        next.port = xray_core::config::PortSpec::single(second.port());
         config.inbounds.push(next);
         drop(reserved);
         assert!(Server::start(config).await.is_err());

@@ -194,7 +194,11 @@ fn normalize_domain(domain: &str) -> Result<String> {
 // Classic endpoint parsing (app/dns/nameserver.go NewServer, classic part)
 // ---------------------------------------------------------------------------
 
-fn parse_upstream(address: &str, port: u16) -> Result<super::ServerLink> {
+fn parse_upstream(
+    address: &str,
+    port: u16,
+    fake_dns: Option<&std::sync::Arc<super::fakedns::FakeDnsEngine>>,
+) -> Result<super::ServerLink> {
     ensure!(!address.is_empty(), "nameserver address is not specified");
     if address.eq_ignore_ascii_case("localhost") {
         bail!(
@@ -203,9 +207,14 @@ fn parse_upstream(address: &str, port: u16) -> Result<super::ServerLink> {
         );
     }
     if address.eq_ignore_ascii_case("fakedns") {
-        bail!(
-            "DNS nameserver {address:?} requires the FakeDNS engine, which is not integrated in DnsApp"
-        );
+        // Callers supply the engine (Go's post-processing installs defaults
+        // when the root fakeDns key is absent).
+        return match fake_dns {
+            Some(engine) => Ok(super::ServerLink::FakeDns(engine.clone())),
+            None => bail!(
+                "DNS nameserver {address:?} requires the FakeDNS engine,                  which is not configured"
+            ),
+        };
     }
     if let Some((scheme, _)) = address.split_once("://") {
         let scheme = scheme.to_ascii_lowercase();
@@ -516,6 +525,8 @@ impl DnsClient {
 /// Ported Go DNS app: hosts mapping plus per-server cached clients with the
 /// source's selection, fallback and query-strategy policy.
 pub struct DnsApp {
+    /// The FakeDNS engine backing `fakedns` nameservers, when configured.
+    fake_dns: Option<std::sync::Arc<super::fakedns::FakeDnsEngine>>,
     clients: Vec<DnsClient>,
     hosts: StaticHosts,
     /// Global query strategy option (Go `s.ipOption`).
@@ -526,15 +537,57 @@ pub struct DnsApp {
 }
 
 impl DnsApp {
-    /// Single JSON entry point: parse the Xray `dns` object and build the app.
+    /// The domain leased to a fake address, if the engine knows it.
+    pub fn fake_dns_domain(&self, ip: IpAddr) -> Option<String> {
+        self.fake_dns.as_ref()?.domain_from_ip(ip)
+    }
+
+    /// Single JSON entry point: parse the Xray `dns` object and build the
+    /// app. `fake_dns` is the root `fakeDns` engine; `None` uses Go's
+    /// post-processing defaults when a `fakedns` nameserver is configured.
     pub fn from_value(value: &serde_json::Value) -> Result<Self> {
+        Self::from_value_with_fake_dns(value, None)
+    }
+
+    pub fn from_value_with_fake_dns(
+        value: &serde_json::Value,
+        fake_dns: Option<std::sync::Arc<super::fakedns::FakeDnsEngine>>,
+    ) -> Result<Self> {
         let config = serde_json::from_value::<DnsAppConfig>(value.clone())
             .context("DNS app configuration")?;
         let geodata = GeoDataStore::from_env().context("geodata store for the DNS app")?;
-        Self::from_config(&config, &geodata)
+        Self::from_config_with_fake_dns(&config, &geodata, fake_dns)
     }
 
     pub fn from_config(config: &DnsAppConfig, geodata: &GeoDataStore) -> Result<Self> {
+        Self::from_config_with_fake_dns(config, geodata, None)
+    }
+
+    pub fn from_config_with_fake_dns(
+        config: &DnsAppConfig,
+        geodata: &GeoDataStore,
+        mut fake_dns: Option<std::sync::Arc<super::fakedns::FakeDnsEngine>>,
+    ) -> Result<Self> {
+        // Go's FakeDNSPostProcessingStage: a fakedns nameserver without a
+        // root object gets strategy defaults.
+        if fake_dns.is_none()
+            && config.servers.iter().any(|server| match server {
+                NameServerConfig::Address(address) => address.eq_ignore_ascii_case("fakedns"),
+                NameServerConfig::Options(options) => {
+                    options.address.eq_ignore_ascii_case("fakedns")
+                }
+            })
+        {
+            let strategy = resolve_query_strategy(&config.query_strategy);
+            let (ipv4, ipv6) = match strategy {
+                QueryStrategy::UseIp4 => (true, false),
+                QueryStrategy::UseIp6 => (false, true),
+                _ => (true, true),
+            };
+            fake_dns = Some(std::sync::Arc::new(super::fakedns::FakeDnsEngine::new(
+                &super::fakedns::FakeDnsSettings::defaults(ipv4, ipv6),
+            )?));
+        }
         ensure!(
             !config.enable_parallel_query,
             "enableParallelQuery requires policy-group racing, which is not integrated in DnsApp"
@@ -574,7 +627,7 @@ impl DnsApp {
                 },
                 NameServerConfig::Options(options) => options.clone(),
             };
-            let upstream = parse_upstream(&options.address, options.port)
+            let upstream = parse_upstream(&options.address, options.port, fake_dns.as_ref())
                 .with_context(|| format!("DNS server {index}"))?;
             let name = match &upstream {
                 super::ServerLink::Classic(upstream) => match upstream.transport {
@@ -589,6 +642,7 @@ impl DnsApp {
                         format!("TLS://{}", client.endpoint().host())
                     }
                 },
+                super::ServerLink::FakeDns(_) => "FAKEDNS://pool".to_owned(),
             };
 
             let strategy = resolve_query_strategy(&options.query_strategy);
@@ -681,6 +735,7 @@ impl DnsApp {
             disable_fallback: config.disable_fallback,
             disable_fallback_if_match: config.disable_fallback_if_match,
             tag: default_tag,
+            fake_dns,
         })
     }
 
@@ -889,23 +944,23 @@ mod tests {
             "tls+local://127.0.0.1:853",
             "tls://tls.example#127.0.0.1,127.0.0.2",
         ] {
-            let link =
-                parse_upstream(address, 0).unwrap_or_else(|error| panic!("{address}: {error:#}"));
+            let link = parse_upstream(address, 0, None)
+                .unwrap_or_else(|error| panic!("{address}: {error:#}"));
             assert!(
                 matches!(link, super::super::ServerLink::Encrypted(_)),
                 "{address} did not build an encrypted client"
             );
         }
         // A routed domain endpoint without pins names the missing dialer.
-        let error = parse_upstream("https://dns.example/dns-query", 0)
+        let error = parse_upstream("https://dns.example/dns-query", 0, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("runtime dialer"), "{error}");
         // QUIC stays rejected by design; h2c names its gap.
-        assert!(parse_upstream("quic://dns.example", 0).is_err());
-        assert!(parse_upstream("h2c://dns.example", 0).is_err());
+        assert!(parse_upstream("quic://dns.example", 0, None).is_err());
+        assert!(parse_upstream("h2c://dns.example", 0, None).is_err());
         // The port field stays contradictory for URL servers.
-        assert!(parse_upstream("https+local://127.0.0.1/dns-query", 53).is_err());
+        assert!(parse_upstream("https+local://127.0.0.1/dns-query", 53, None).is_err());
     }
 
     /// An in-process DoH fixture: one TLS+h2 connection answering every
@@ -970,6 +1025,34 @@ mod tests {
             }
         });
         (client_tls, port, log, task)
+    }
+
+    #[tokio::test]
+    async fn fakedns_nameserver_leases_and_reverse_maps() {
+        timeout(std::time::Duration::from_secs(10), async {
+            let app = DnsApp::from_value_with_fake_dns(
+                &serde_json::json!({"servers": ["fakedns"]}),
+                None,
+            )
+            .unwrap();
+            let first = app
+                .lookup_ip("origin.example", super::QueryOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(first.ips.len(), 2, "both default families lease");
+            // The lease is stable across lookups.
+            let second = app
+                .lookup_ip("origin.example", super::QueryOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(first.ips, second.ips);
+            // The engine reverse-maps the fake addresses back to the domain.
+            for ip in first.ips {
+                assert_eq!(app.fake_dns_domain(ip), Some("origin.example".to_owned()));
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1459,7 +1542,6 @@ mod tests {
             serde_json::json!({"servers": ["https://dns.example/dns-query"]}),
             serde_json::json!({"servers": ["h2c://192.0.2.1/dns-query"]}),
             serde_json::json!({"servers": ["quic+local://192.0.2.1"]}),
-            serde_json::json!({"servers": ["fakedns"]}),
             serde_json::json!({"servers": ["localhost"]}),
             serde_json::json!({"servers": ["dns.example"]}),
             serde_json::json!({"servers": [{"address": "tcp://192.0.2.1", "port": 53}]}),

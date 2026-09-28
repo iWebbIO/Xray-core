@@ -29,7 +29,7 @@ pub const FAKE_DNS_TTL: u32 = 1;
 
 /// One pool element of the `"fakeDns"` root object: a CIDR plus its LRU size
 /// (`ipPool` / `poolSize`).
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct FakeDnsPoolSettings {
     #[serde(rename = "ipPool")]
@@ -40,7 +40,7 @@ pub struct FakeDnsPoolSettings {
 
 /// The `"fakeDns"` root object: one pool element or a `pools` array (Go's
 /// untagged `FakeDNSConfig`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct FakeDnsSettings {
     pub pools: Vec<FakeDnsPoolSettings>,
 }

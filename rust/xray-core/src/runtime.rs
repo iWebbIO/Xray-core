@@ -73,6 +73,9 @@ struct Dispatcher {
     /// Mux.Cool carrier pools per outbound, aligned with `outbounds`
     /// (Go's two ClientManagers per mux-enabled outbound handler).
     mux: Vec<Option<mux_runtime::MuxOutbound>>,
+    /// The FakeDNS engine: fake-pool destinations map back to their domain
+    /// before routing (Go's dispatcher IsIPInIPPool swap).
+    fake_dns: Option<std::sync::Arc<crate::dns::fakedns::FakeDnsEngine>>,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -218,61 +221,72 @@ impl Server {
         let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
         let mut addresses = Vec::new();
         for (raw, inbound, transport) in compiled.inbounds {
-            let listener = match transport
-                .bind(SocketAddr::new(raw.listen, raw.port))
-                .await
-                .with_context(|| {
-                    format!(
-                        "cannot bind inbound {:?} on {}:{}",
-                        raw.tag, raw.listen, raw.port
-                    )
-                }) {
-                Ok(listener) => listener,
-                Err(error) => {
-                    // KCP owns a UDP receive task. Join every prior listener's
-                    // close before returning so failed startup releases ports.
-                    for (listener, _, _, _, _) in listeners {
-                        if let Err(close_error) = listener.close().await {
-                            tracing::warn!(%close_error, "inbound rollback close failed");
-                        }
-                    }
-                    return Err(error);
-                }
-            };
-            addresses.push(listener.local_addr()?);
-            seeds.push((raw.clone(), inbound.clone(), transport.clone()));
-            // Go compiles the sniffing request per inbound handler; eager
-            // compilation surfaces geodata and rule errors before listening.
+            // Go's PortList: one listener per port of the inbound's range.
             let sniff = sniffing::SniffingRequest::compile(
                 raw.sniffing.as_ref(),
                 &crate::geodata::GeoDataStore::from_env()?,
             )
             .with_context(|| format!("inbound {:?} sniffing", raw.tag))?;
-            listeners.push((listener, inbound, raw.tag, transport, sniff.map(Arc::new)));
-        }
-        let mut udp_listeners = Vec::new();
-        for (raw, inbound, _) in &seeds {
-            if let Inbound::Shadowsocks2022 { account, udp: true } = inbound {
-                let bound = ss2022_udp_runtime::Ss2022UdpListener::bind(
-                    SocketAddr::new(raw.listen, raw.port),
-                    account,
-                );
-                let bound = match bound {
-                    Ok(bound) => bound,
+            let sniff = sniff.map(Arc::new);
+            for port in raw.port.ports() {
+                let listener = match transport
+                    .bind(SocketAddr::new(raw.listen, *port))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "cannot bind inbound {:?} on {}:{}",
+                            raw.tag, raw.listen, port
+                        )
+                    }) {
+                    Ok(listener) => listener,
                     Err(error) => {
-                        // Release the already-bound TCP listeners before the
-                        // failed startup propagates, exactly like a TCP bind
-                        // failure inside the loop above.
+                        // KCP owns a UDP receive task. Join every prior
+                        // listener's close before returning so failed startup
+                        // releases ports.
                         for (listener, _, _, _, _) in listeners {
                             if let Err(close_error) = listener.close().await {
                                 tracing::warn!(%close_error, "inbound rollback close failed");
                             }
                         }
-                        return Err(error)
-                            .with_context(|| format!("cannot bind inbound {:?} UDP", raw.tag));
+                        return Err(error);
                     }
                 };
-                udp_listeners.push((bound, raw.tag.clone()));
+                addresses.push(listener.local_addr()?);
+                seeds.push((raw.clone(), inbound.clone(), transport.clone()));
+                listeners.push((
+                    listener,
+                    inbound.clone(),
+                    raw.tag.clone(),
+                    transport.clone(),
+                    sniff.clone(),
+                ));
+            }
+        }
+        let mut udp_listeners = Vec::new();
+        for (raw, inbound, _) in &seeds {
+            if let Inbound::Shadowsocks2022 { account, udp: true } = inbound {
+                for port in raw.port.ports() {
+                    let bound = ss2022_udp_runtime::Ss2022UdpListener::bind(
+                        SocketAddr::new(raw.listen, *port),
+                        account,
+                    );
+                    let bound = match bound {
+                        Ok(bound) => bound,
+                        Err(error) => {
+                            // Release the already-bound TCP listeners before the
+                            // failed startup propagates, exactly like a TCP bind
+                            // failure inside the loop above.
+                            for (listener, _, _, _, _) in listeners {
+                                if let Err(close_error) = listener.close().await {
+                                    tracing::warn!(%close_error, "inbound rollback close failed");
+                                }
+                            }
+                            return Err(error)
+                                .with_context(|| format!("cannot bind inbound {:?} UDP", raw.tag));
+                        }
+                    };
+                    udp_listeners.push((bound, raw.tag.clone()));
+                }
             }
         }
         let dispatcher = Arc::new(Dispatcher {
@@ -290,6 +304,7 @@ impl Server {
             wireguard: wireguard_runtime::WireguardPool::new(),
             masque: Default::default(),
             mux: mux_pools,
+            fake_dns: compiled.fake_dns.clone(),
         });
         for outbound_mux in dispatcher.mux.iter().flatten() {
             for pool in [&outbound_mux.tcp, &outbound_mux.xudp]
@@ -767,6 +782,15 @@ async fn dispatch_common(
     // peeked within Go's budget and replayed into the relay; destOverride
     // replaces the routed (and, without routeOnly, the dialed) destination
     // with the sniffed domain. A failed sniff relays unchanged.
+    // A destination inside the FakeDNS pool maps back to its leased domain
+    // before routing and dialing (Go's dispatcher swaps the target when
+    // IsIPInIPPool); unmapped pool addresses route unchanged.
+    if let (Some(engine), crate::address::Address::Ip(ip)) =
+        (&dispatcher.fake_dns, &request.destination.address)
+        && let Some(domain) = engine.domain_from_ip(*ip)
+    {
+        request.destination.address = crate::address::Address::Domain(domain);
+    }
     let mut sniffed_protocol = None;
     let mut route_destination = request.destination.clone();
     if let Some(sniff) = sniff.as_ref() {
