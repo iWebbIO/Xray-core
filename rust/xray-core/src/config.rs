@@ -38,6 +38,17 @@ pub struct Config {
     /// The root `fakeDns` pools (Go's FakeDNSConfig).
     #[serde(rename = "fakeDns")]
     pub fake_dns: Option<crate::dns::fakedns::FakeDnsSettings>,
+    /// Go's root `env` map: consumed by the CLI loader like Go's Build; the
+    /// field only tolerates the key for direct Config parses.
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Go's root `version` guard: refuse to run outside [min, max].
+    pub version: Option<VersionConfig>,
+    /// Go's root `geodata` asset paths.
+    pub geodata: Option<GeodataConfig>,
+    /// Go's root `metrics` (pprof HTTP). The pprof profiler is not
+    /// integrated in this runtime build; the key is accepted and fails at
+    /// compile time with a named error.
+    pub metrics: Option<Value>,
     pub inbounds: Vec<InboundConfig>,
     pub outbounds: Vec<OutboundConfig>,
     pub routing: RoutingConfig,
@@ -174,6 +185,35 @@ pub struct OutboundConfig {
     pub stream_settings: StreamSettings,
     #[serde(default)]
     pub mux: Option<MuxSettings>,
+}
+
+/// Go's `VersionConfig` (`infra/conf/version.go`): the core version must
+/// fall within [min, max] (empty bounds are unbounded).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VersionConfig {
+    pub min: String,
+    pub max: String,
+}
+
+/// Go's `GeodataConfig` asset paths (`infra/conf/geodata.go`): per-asset
+/// paths overriding the environment locations. The cron/outbound download
+/// scheduler is not integrated and fails with a named error.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeodataConfig {
+    pub cron: Option<String>,
+    pub outbound: String,
+    pub assets: Vec<GeodataAsset>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeodataAsset {
+    pub file: String,
+    pub tag: Option<String>,
+    /// One of `geoip`/`geosite` (Go's type inference by filename prefix).
+    pub kind: Option<String>,
 }
 
 /// Go's `MuxConfig` (infra/conf/xray.go): Mux.Cool multiplexing over the
@@ -691,6 +731,25 @@ pub(crate) struct ValidatedConfig {
     pub router: Router,
 }
 
+/// Go's `compareVersions`: dot-separated numeric parts, missing parts are
+/// zero, non-numeric parts are errors.
+fn compare_versions(left: &str, right: &str) -> Result<std::cmp::Ordering> {
+    let parse = |value: &str| -> Result<Vec<u64>> {
+        value
+            .split('.')
+            .map(|part| {
+                part.parse::<u64>()
+                    .map_err(|_| anyhow::anyhow!("invalid version {value:?}"))
+            })
+            .collect()
+    };
+    let (mut left, mut right) = (parse(left)?, parse(right)?);
+    let length = left.len().max(right.len());
+    left.resize(length, 0);
+    right.resize(length, 0);
+    Ok(left.cmp(&right))
+}
+
 fn default_listen() -> IpAddr {
     IpAddr::from([0, 0, 0, 0])
 }
@@ -988,6 +1047,52 @@ impl Config {
                 });
             }
         }
+        // Go's app/version: refuse to run outside [min, max] against the
+        // core version (semantic triples, each part optional).
+        if let Some(version) = &self.version {
+            let core = env!("CARGO_PKG_VERSION");
+            for (bound, name) in [(&version.min, "min"), (&version.max, "max")] {
+                if !bound.is_empty() && compare_versions(core, bound).is_err_and(|_| true) {
+                    bail!("invalid version bound {bound:?} in {name}");
+                }
+            }
+            if !version.min.is_empty()
+                && compare_versions(core, &version.min)
+                    .is_ok_and(|ordering| ordering == std::cmp::Ordering::Less)
+            {
+                bail!(
+                    "this config must be run on version {} or higher",
+                    version.min
+                );
+            }
+            if !version.max.is_empty()
+                && compare_versions(core, &version.max)
+                    .is_ok_and(|ordering| ordering == std::cmp::Ordering::Greater)
+            {
+                bail!(
+                    "this config must be run on version {} or lower",
+                    version.max
+                );
+            }
+        }
+        // Go's app/geodata: the download/swap scheduler is a separate app;
+        // paths are honored through the environment, and cron/outbound
+        // name the missing scheduler explicitly.
+        if let Some(geodata) = &self.geodata {
+            let scheduler_requested = geodata.cron.is_some()
+                || !geodata.outbound.is_empty()
+                || !geodata.assets.is_empty();
+            if scheduler_requested {
+                bail!(
+                    "the geodata download/swap scheduler is not integrated in this runtime build;                      provide assets through the geodata environment paths"
+                );
+            }
+        }
+        // Go's app/metrics serves pprof over HTTP; the profiler is absent.
+        if let Some(metrics) = &self.metrics {
+            let _ = metrics;
+            bail!("the metrics pprof endpoint is not integrated in this runtime build");
+        }
         let router = Router::compile(&self.routing, &routing_outbounds)?;
         Ok(ValidatedConfig {
             observatory,
@@ -1190,6 +1295,56 @@ mod tests {
         )
         .unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn root_version_env_geodata_and_metrics_follow_go() {
+        let config = Config::from_json(
+            r#"{"version":{"min":"0.0.0","max":"999.0.0"},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        // A min bound above the core version refuses to run.
+        let config = Config::from_json(
+            r#"{"version":{"min":"999.0.0"},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("999.0.0 or higher"), "{error}");
+        // A max below the core version refuses too.
+        let config = Config::from_json(
+            r#"{"version":{"max":"0.0.1"},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        assert!(config.validate().unwrap_err().to_string().contains("lower"));
+        // env is tolerated (the CLI loader consumes it).
+        Config::from_json(r#"{"env":{"A":"a"},"outbounds":[{"protocol":"freedom"}]}"#)
+            .unwrap()
+            .validate()
+            .unwrap();
+        // geodata's scheduler and the metrics app name their gaps explicitly.
+        let config = Config::from_json(
+            r#"{"geodata":{"cron":"0 0 * * *"},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("geodata")
+        );
+        let config = Config::from_json(
+            r#"{"metrics":{"tag":"metrics","listen":"127.0.0.1:0"},"outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("metrics")
+        );
     }
 
     #[test]
