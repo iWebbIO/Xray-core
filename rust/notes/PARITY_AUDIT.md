@@ -404,3 +404,28 @@ runtime dependency.
 5. Run the full locked workspace checks and real-reference harness with output
    retained, then platform/release verification. Do not retire Go source or
    claim full parity until the inventory and validation evidence justify it.
+
+## September 28, 2026 — root config/runtime wiring complete (11284fa8)
+
+The 15 delivered components are wired into the root config and runtime
+(Phase-0 skeleton 77a47812 + integration 11284fa8): VLESS Vision flows and
+mlkem768x25519plus sessions live on both sides; REALITY inbound accepts
+through the batch parser; Trojan UDP and SS2022 `tcp,udp` listeners serve
+through the UDP dispatcher; the WireGuard outbound engine pool dials real
+targets (the transport send is now async — the sync try_send_to surfaced
+tokio's readiness gate as an engine-killing WouldBlock); freedom
+domainStrategy resolves through the configured DNS app; the reverse app
+compiles portal tags as routing outbounds, attaches bridge-domain carriers
+before routing and relays end to end (two-server test); burstObservatory
+mirrors the ordinary observer with Go's Manager.Select prefix selection;
+HandlerService serves listings and user queries from runtime state with
+every unimplemented mutation failing explicitly; the MASQUE outbound shares
+one h2 client per outbound and opens one extended-CONNECT per connection;
+the generic masque transport arm relays through the Hub; the CLI loader
+applies the Go-verified YAML 1.1/env compat.
+
+Gates: fmt/clippy -D warnings clean, workspace tests **1062/0/5**, Go
+interop **34/6/8** (XRAY_GO_BINARY as an absolute path), all five
+env-gated Go fixtures pass. Explicitly rejected (fail with named gaps,
+never silently): HandlerService mutations, reverse XUDP, 2022-chacha20
+UDP, MASQUE HTTP/3, legacy SS UDP, dokodemo UDP, port ranges, user levels.
