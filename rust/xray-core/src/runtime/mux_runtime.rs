@@ -50,7 +50,7 @@ struct Worker {
 /// Go's per-worker `ClientStrategy` limits plus the worker list. The pool
 /// dials through the dispatcher (a `Weak` link set once it exists), so pools
 /// stay constructible before the runtime is assembled.
-pub(crate) struct MuxPool {
+pub struct MuxPool {
     limits: PoolLimits,
     kind: Network,
     dispatcher: std::sync::OnceLock<Weak<Dispatcher>>,
@@ -80,14 +80,6 @@ impl MuxPool {
     /// pool never keeps the runtime alive).
     pub(super) fn attach(&self, dispatcher: &Arc<Dispatcher>) {
         let _ = self.dispatcher.set(Arc::downgrade(dispatcher));
-    }
-
-    /// Live worker count (the carrier-sharing observable for tests).
-    #[cfg(test)]
-    pub(super) async fn worker_count(&self) -> usize {
-        let mut workers = self.workers.lock().await;
-        workers.retain(|worker| !worker.connection.is_closed());
-        workers.len()
     }
 
     /// Pick or spawn a worker, then open one session on it, mirroring Go's
@@ -209,7 +201,7 @@ impl MuxPool {
 /// The UDP routing view of one outbound's mux plan: the pool that serves
 /// UDP (XUDP pool when configured, else the plain TCP pool, like Go's
 /// ClientManager choice) and its UDP/443 policy.
-pub(crate) struct MuxUdpRoute {
+pub struct MuxUdpRoute {
     pub(super) pool: std::sync::Arc<MuxPool>,
     pub(super) udp443: Udp443Policy,
 }
@@ -255,7 +247,7 @@ impl Dispatcher {
 /// One open XUDP session handed to a UDP association: packets flow through
 /// the sender with per-packet targets; replies arrive on the receiver as
 /// (reply source endpoint, payload). Dropping the lease closes the session.
-pub(crate) struct XudpLease {
+pub struct XudpLease {
     pub(super) route: usize,
     sender: SessionSender,
     replies: tokio::sync::Mutex<mpsc::Receiver<(Target, Vec<u8>)>>,
@@ -330,15 +322,16 @@ struct XudpAssociation {
 /// Serve one accepted proxy connection whose request targeted `v1.mux.cool`.
 /// The proxy reply header must already be on the wire; every accepted session
 /// dispatches through the runtime's normal path under the original inbound.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_carrier(
     dispatcher: &Arc<Dispatcher>,
-
     inbound: Arc<Inbound>,
     tag: Arc<str>,
     user: String,
     source: SocketAddr,
     stream: BoxStream,
     cancel: &CancellationToken,
+    sniff: Option<Arc<super::sniffing::SniffingRequest>>,
 ) -> anyhow::Result<()> {
     let (connection, mut incoming) = Connection::server(
         stream,
@@ -368,6 +361,7 @@ pub(super) async fn serve_carrier(
                 let user = user.clone();
                 let registry = registry.clone();
                 let session_cancel = cancel.child_token();
+                let session_sniff = sniff.clone();
                 sessions.spawn(async move {
                     // The explicit box erases the session's future type: mux
                     // sessions dispatch back through `dispatch_request`, whose
@@ -383,6 +377,7 @@ pub(super) async fn serve_carrier(
                         registry,
                         session,
                         &session_cancel,
+                        session_sniff,
                     ));
                     if let Err(error) = session.await {
                         tracing::debug!(error = %format!("{error:#}"), "mux session closed");
@@ -406,6 +401,7 @@ async fn serve_session(
     registry: Arc<tokio::sync::Mutex<AssociationRegistry<XudpAssociation>>>,
     session: Session,
     cancel: &CancellationToken,
+    sniff: Option<Arc<super::sniffing::SniffingRequest>>,
 ) -> anyhow::Result<()> {
     if session.target.network == Network::Tcp {
         // An ordinary request riding the carrier; dispatch exactly like a
@@ -440,6 +436,7 @@ async fn serve_session(
             request,
             None,
             dispatcher.policy.for_level(0),
+            sniff,
         )
         .await;
     }
@@ -525,6 +522,7 @@ async fn serve_xudp_session(
 /// Forward one inbound packet through the UDP dispatcher, opening (or
 /// reusing) the association's NAT socket toward the admitted endpoint, and
 /// spawning its bounded reply pump.
+#[allow(clippy::too_many_arguments)]
 async fn xudp_forward(
     dispatcher: &Arc<Dispatcher>,
     tag: &Arc<str>,

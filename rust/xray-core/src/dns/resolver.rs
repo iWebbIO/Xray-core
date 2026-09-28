@@ -30,6 +30,28 @@ pub struct Upstream {
     pub transport: Transport,
 }
 
+/// One server of a resolver's ordered fallback list: a classic UDP/TCP
+/// endpoint, or an encrypted DoH/DoT client with its own exchange budget.
+#[derive(Clone)]
+pub enum ServerLink {
+    Classic(Upstream),
+    /// DNS-over-HTTPS / DNS-over-TLS; the client restores the caller's
+    /// original query ID so the shared validation applies unchanged.
+    Encrypted(std::sync::Arc<super::encrypted::EncryptedClient>),
+}
+
+impl std::fmt::Debug for ServerLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Classic(upstream) => formatter.debug_tuple("Classic").field(upstream).finish(),
+            Self::Encrypted(client) => formatter
+                .debug_tuple("Encrypted")
+                .field(&client.endpoint().host())
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 impl Upstream {
     pub fn udp(address: SocketAddr) -> Self {
         Self {
@@ -89,7 +111,7 @@ pub enum HostEntry {
 pub struct ResolverConfig {
     /// Ordered explicit fallback servers. NXDOMAIN/NODATA are final DNS
     /// replies; transport errors and SERVFAIL/REFUSED try the next server.
-    pub servers: Vec<Upstream>,
+    pub servers: Vec<ServerLink>,
     /// Per-server budget, shared by UDP and its optional TCP retry.
     pub timeout: Duration,
     pub cache: CacheConfig,
@@ -181,11 +203,10 @@ impl Resolver {
         if config.timeout.is_zero() {
             return Err(DnsError::InvalidConfig("query timeout is zero"));
         }
-        if config
-            .servers
-            .iter()
-            .any(|server| server.address.port() == 0)
-        {
+        if config.servers.iter().any(|server| match server {
+            ServerLink::Classic(upstream) => upstream.address.port() == 0,
+            ServerLink::Encrypted(client) => client.endpoint().port() == 0,
+        }) {
             return Err(DnsError::InvalidConfig("nameserver port is zero"));
         }
         let mut normalized = HashMap::new();
@@ -393,16 +414,33 @@ impl Resolver {
             // each UDP exchange; connected sockets restrict the response source.
             let id = rand::random::<u16>();
             let bytes = wire::encode_query(id, &question, self.inner.config.client_ip)?;
-            let result = timeout(
-                self.inner.config.timeout,
-                exchange(
-                    *server,
-                    &bytes,
-                    id,
-                    &question,
-                    self.inner.config.tcp_fallback,
-                ),
-            )
+            let result = timeout(self.inner.config.timeout, async {
+                match server {
+                    ServerLink::Classic(upstream) => {
+                        exchange(
+                            *upstream,
+                            &bytes,
+                            id,
+                            &question,
+                            self.inner.config.tcp_fallback,
+                        )
+                        .await
+                    }
+                    ServerLink::Encrypted(client) => {
+                        // The encrypted client runs its own budget internally;
+                        // it restores the caller's ID so validation is shared.
+                        client
+                            .exchange(&bytes, &tokio_util::sync::CancellationToken::new())
+                            .await
+                            .map_err(|error| DnsError::Unsupported(error.to_string()))
+                            .and_then(|reply| {
+                                let message = wire::decode(&reply)?;
+                                validate_response(&message, id, &question)?;
+                                Ok(message)
+                            })
+                    }
+                }
+            })
             .await;
             match result {
                 Ok(Ok(message)) => {

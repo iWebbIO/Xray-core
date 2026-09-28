@@ -39,6 +39,13 @@ pub struct RuleConfig {
     pub source_port: Option<PortSpec>,
     #[serde(deserialize_with = "strings")]
     pub user: Vec<String>,
+    /// Routing by the connection's sniffed protocol (Go's `protocol` rule
+    /// field, matched by app/router's ProtocolMatcher): "http", "tls",
+    /// "quic" or "bittorrent". The sniffed protocol is threaded in through
+    /// [`Router::select_with_route_sniffed`]; a rule with this condition
+    /// matches only when the connection's sniffed protocol is set.
+    #[serde(deserialize_with = "strings")]
+    pub protocol: Vec<String>,
 }
 
 pub(crate) fn strings<'de, D: serde::Deserializer<'de>>(
@@ -105,6 +112,8 @@ struct Rule {
     sources: Option<IpMatcher>,
     source_ports: Ports,
     users: Vec<String>,
+    /// Sniffed protocol names from the rule's `protocol` field.
+    protocols: Vec<String>,
 }
 
 pub struct RouteContext<'a> {
@@ -164,9 +173,16 @@ impl Router {
                     || !raw.inbound_tag.is_empty()
                     || !source.is_empty()
                     || raw.source_port.is_some()
-                    || !raw.user.is_empty(),
+                    || !raw.user.is_empty()
+                    || !raw.protocol.is_empty(),
                 "routing rule has no matching conditions"
             );
+            for protocol in &raw.protocol {
+                ensure!(
+                    matches!(protocol.as_str(), "http" | "tls" | "quic" | "bittorrent"),
+                    "unknown routing rule protocol {protocol:?}"
+                );
+            }
             let networks = if raw.network.is_empty() {
                 vec![]
             } else {
@@ -203,6 +219,7 @@ impl Router {
                     .with_context(|| format!("routing rule {index} source IP matcher"))?,
                 source_ports: Ports::compile(&raw.source_port)?,
                 users: raw.user.clone(),
+                protocols: raw.protocol.clone(),
             });
         }
         Ok(Self { rules })
@@ -213,9 +230,24 @@ impl Router {
     }
 
     pub fn select_with_route(&self, context: &RouteContext<'_>) -> (usize, bool) {
+        self.select_with_route_sniffed(context, None)
+    }
+
+    /// Selects with the connection's sniffed protocol threaded in (Go's
+    /// `routing.Context.GetProtocol` + app/router's ProtocolMatcher).
+    /// `None` keeps the pre-sniffing behavior: a rule with a `protocol`
+    /// condition never matches (exactly Go, where an un-sniffed connection
+    /// has an empty protocol). The sniffed protocol is one of
+    /// "http1"/"http2", "tls", "quic" or "bittorrent"; rules match by Go's
+    /// prefix semantics, so a `"http"` rule matches a sniffed `"http1"`.
+    pub fn select_with_route_sniffed(
+        &self,
+        context: &RouteContext<'_>,
+        sniffed_protocol: Option<&str>,
+    ) -> (usize, bool) {
         self.rules
             .iter()
-            .find(|rule| rule.matches(context))
+            .find(|rule| rule.matches(context, sniffed_protocol))
             .map_or((0, false), |rule| (rule.outbound, true))
     }
 }
@@ -231,7 +263,7 @@ fn ip_matcher(store: &GeoDataStore, values: &[String]) -> Result<Option<IpMatche
 }
 
 impl Rule {
-    fn matches(&self, context: &RouteContext<'_>) -> bool {
+    fn matches(&self, context: &RouteContext<'_>, sniffed_protocol: Option<&str>) -> bool {
         let domain_matches =
             self.domains
                 .as_ref()
@@ -246,6 +278,14 @@ impl Rule {
                     Address::Ip(ip) => matcher.match_ip(ip),
                     _ => false,
                 });
+        // Go's ProtocolMatcher: the sniffed protocol must be set and have a
+        // rule entry as a prefix ("http" matches "http1"/"http2").
+        let protocol_matches = self.protocols.is_empty()
+            || sniffed_protocol.is_some_and(|sniffed| {
+                self.protocols
+                    .iter()
+                    .any(|protocol| sniffed.starts_with(protocol))
+            });
         domain_matches
             && ip_matches
             && self.ports.matches(context.destination.port)
@@ -257,6 +297,7 @@ impl Rule {
                 .is_none_or(|matcher| matcher.match_ip(context.source.ip()))
             && self.source_ports.matches(context.source.port())
             && (self.users.is_empty() || self.users.iter().any(|n| n == context.user))
+            && protocol_matches
     }
 }
 

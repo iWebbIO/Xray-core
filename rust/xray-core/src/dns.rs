@@ -14,8 +14,8 @@ pub mod wire;
 
 pub use cache::CacheConfig;
 pub use resolver::{
-    DnsAnswer, HostEntry, LookupResult, QueryOptions, Resolver, ResolverConfig, Transport,
-    Upstream, read_tcp_message, write_tcp_message,
+    DnsAnswer, HostEntry, LookupResult, QueryOptions, Resolver, ResolverConfig, ServerLink,
+    Transport, Upstream, read_tcp_message, write_tcp_message,
 };
 pub use service::{DnsService, ServiceConfig};
 pub use wire::{Question, RecordType};

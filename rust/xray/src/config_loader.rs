@@ -122,6 +122,14 @@ impl Format {
     }
 
     fn for_source(path: &Path, requested: &str) -> Result<Self> {
+        let source = path.to_string_lossy();
+        if remote::is_remote_source(&source) {
+            // Remote sources infer from the URL's extension (Go's
+            // core.GetFormat on the URL path), JSON otherwise.
+            return Self::by_name(requested)
+                .map_or_else(|| remote::infer_format(&source), Ok)
+                .with_context(|| format!("cannot infer configuration format for {source}"));
+        }
         ensure_local_source(path)?;
         let format = Self::by_name(requested)
             .or_else(|| {
@@ -272,6 +280,9 @@ fn load_with(
                 .read_to_end(&mut bytes)
                 .context("cannot read configuration from stdin")?;
             bytes
+        } else if remote::is_remote_source(&path.to_string_lossy()) {
+            remote::fetch(&path.to_string_lossy())
+                .with_context(|| format!("cannot read configuration {}", path.display()))?
         } else {
             fs::read(path)
                 .with_context(|| format!("cannot read configuration {}", path.display()))?
@@ -1222,18 +1233,21 @@ mod tests {
     }
 
     #[test]
-    fn errors_identify_source_and_unsupported_source_types() {
-        for name in [
-            "https://example.test/config.json",
-            "http+unix:///tmp/api.sock/config",
-            "@abstract:/config",
-            "/tmp/api.sock:/config",
+    fn remote_sources_infer_their_format_from_the_url() {
+        // Remote HTTP and Unix-socket sources are fetched, no longer rejected;
+        // their formats infer from the URL extension (JSON without one).
+        for (name, format) in [
+            ("https://example.test/config.json", Format::Json),
+            ("https://example.test/config.yaml", Format::Yaml),
+            ("http+unix:///tmp/api.sock/config", Format::Json),
+            ("@abstract:/config", Format::Json),
+            ("/tmp/api.sock:/config", Format::Json),
         ] {
-            let error = Format::for_source(Path::new(name), "auto")
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(name), "{error}");
-            assert!(error.contains("not supported"), "{error}");
+            assert_eq!(
+                Format::for_source(Path::new(name), "auto").unwrap(),
+                format,
+                "{name}"
+            );
         }
         let files = Fixtures::new();
         let bad = files.write("broken.json", "{\"inbounds\": [}");

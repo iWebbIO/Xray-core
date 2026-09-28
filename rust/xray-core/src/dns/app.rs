@@ -194,7 +194,7 @@ fn normalize_domain(domain: &str) -> Result<String> {
 // Classic endpoint parsing (app/dns/nameserver.go NewServer, classic part)
 // ---------------------------------------------------------------------------
 
-fn parse_upstream(address: &str, port: u16) -> Result<Upstream> {
+fn parse_upstream(address: &str, port: u16) -> Result<super::ServerLink> {
     ensure!(!address.is_empty(), "nameserver address is not specified");
     if address.eq_ignore_ascii_case("localhost") {
         bail!(
@@ -216,14 +216,26 @@ fn parse_upstream(address: &str, port: u16) -> Result<Upstream> {
         }
         return match scheme.as_str() {
             "udp" | "tcp" => {
-                Upstream::parse(address).with_context(|| format!("DNS nameserver {address:?}"))
+                let upstream = Upstream::parse(address)
+                    .with_context(|| format!("DNS nameserver {address:?}"))?;
+                Ok(super::ServerLink::Classic(upstream))
             }
-            "tcp+local" => Upstream::parse(&format!("tcp://{}", &address["tcp+local://".len()..]))
-                .with_context(|| format!("DNS nameserver {address:?}")),
-            "https" | "https+local" | "h2c" | "h2c+local" | "quic" | "quic+local" | "tls"
-            | "tls+local" => bail!(
-                "DNS nameserver scheme {scheme:?} (encrypted DNS) is not integrated in DnsApp; \
-                 only classic udp/tcp servers are supported"
+            "tcp+local" => {
+                let upstream =
+                    Upstream::parse(&format!("tcp://{}", &address["tcp+local://".len()..]))
+                        .with_context(|| format!("DNS nameserver {address:?}"))?;
+                Ok(super::ServerLink::Classic(upstream))
+            }
+            "https" | "https+local" | "tls" | "tls+local" => {
+                Ok(super::ServerLink::Encrypted(build_encrypted(address)?))
+            }
+            "h2c" | "h2c+local" => bail!(
+                "DNS nameserver scheme {scheme:?} (cleartext HTTP/2 DNS) is not integrated; \
+                 use https"
+            ),
+            "quic" | "quic+local" => bail!(
+                "DNS nameserver scheme {scheme:?} (DNS-over-QUIC) is rejected by design; \
+                 use https or tls"
             ),
             _ => bail!("unsupported DNS nameserver scheme {scheme:?}"),
         };
@@ -238,10 +250,69 @@ fn parse_upstream(address: &str, port: u16) -> Result<Upstream> {
              which is not integrated in DnsApp"
         )
     })?;
-    Ok(Upstream::udp(SocketAddr::new(
+    Ok(super::ServerLink::Classic(Upstream::udp(SocketAddr::new(
         ip,
         if port == 0 { 53 } else { port },
-    )))
+    ))))
+}
+
+/// Build an encrypted (DoH/DoT) client from a nameserver URL. The Go `#ip`
+/// fragment pins explicit bootstrap addresses; a routed endpoint whose host
+/// is a domain without a fragment needs the runtime dialer plus a resolver
+/// for the server's own host, neither of which is integrated — such servers
+/// fail explicitly instead of silently using the system resolver.
+fn build_encrypted(address: &str) -> Result<std::sync::Arc<super::encrypted::EncryptedClient>> {
+    let (url, fragment) = match address.split_once('#') {
+        Some((url, fragment)) => (url, Some(fragment)),
+        None => (address, None),
+    };
+    let bootstrap = match fragment {
+        None => Vec::new(),
+        Some(fragment) => fragment
+            .split(',')
+            .map(|ip| {
+                ip.parse::<IpAddr>()
+                    .with_context(|| format!("invalid bootstrap address {ip:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let numeric_host = url
+        .split_once("://")
+        .map(|(_, rest)| {
+            let host = rest.split(['/', ':']).next().unwrap_or_default();
+            let host = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
+            host.parse::<IpAddr>().is_ok()
+        })
+        .unwrap_or(false);
+    // `+local` schemes, numeric hosts and explicit bootstrap addresses all
+    // dial directly (Go: the # fragment pins the endpoint), so the effective
+    // endpoint is always the local mode. A routed domain endpoint without
+    // pins needs the runtime dialer, which is not integrated: fail
+    // explicitly.
+    let local_path = url.contains("+local") || numeric_host || !bootstrap.is_empty();
+    if !local_path {
+        bail!(
+            "routed encrypted DNS server {address:?} requires the runtime dialer,              which is not integrated; use an +local scheme, a numeric host or a              #bootstrap fragment"
+        );
+    }
+    let effective = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.ends_with("+local") => {
+            format!("{scheme}+local://{rest}")
+        }
+        _ => url.to_owned(),
+    };
+    let endpoint = super::encrypted::EncryptedEndpoint::parse(&effective)
+        .with_context(|| format!("DNS nameserver {address:?}"))?;
+    let mut config = super::encrypted::EncryptedConfig::new(endpoint.clone());
+    config.bootstrap = bootstrap;
+    config.timeout = Duration::from_secs(5);
+    Ok(std::sync::Arc::new(
+        super::encrypted::EncryptedClient::new(config)
+            .with_context(|| format!("DNS nameserver {address:?}"))?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -505,9 +576,19 @@ impl DnsApp {
             };
             let upstream = parse_upstream(&options.address, options.port)
                 .with_context(|| format!("DNS server {index}"))?;
-            let name = match upstream.transport {
-                super::Transport::Udp => format!("UDP://{}", upstream.address),
-                super::Transport::Tcp => format!("TCP://{}", upstream.address),
+            let name = match &upstream {
+                super::ServerLink::Classic(upstream) => match upstream.transport {
+                    super::Transport::Udp => format!("UDP://{}", upstream.address),
+                    super::Transport::Tcp => format!("TCP://{}", upstream.address),
+                },
+                super::ServerLink::Encrypted(client) => match client.endpoint().protocol() {
+                    super::encrypted::EncryptedProtocol::Https => {
+                        format!("HTTPS://{}", client.endpoint().host())
+                    }
+                    super::encrypted::EncryptedProtocol::Tls => {
+                        format!("TLS://{}", client.endpoint().host())
+                    }
+                },
             };
 
             let strategy = resolve_query_strategy(&options.query_strategy);
@@ -782,13 +863,187 @@ fn merge_query_errors(domain: &str, mut errors: Vec<DnsError>) -> DnsError {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use tokio::{net::UdpSocket, task::JoinHandle};
+    use tokio::{
+        net::{TcpListener, UdpSocket},
+        task::JoinHandle,
+        time::timeout,
+    };
 
-    use super::super::{RecordType, wire};
+    use super::super::{
+        RecordType,
+        encrypted::{EncryptedConfig, EncryptedEndpoint},
+        wire,
+    };
     use super::*;
 
     fn ip(value: &str) -> IpAddr {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn encrypted_nameserver_parsing_follows_the_go_surface() {
+        // +local, numeric hosts and #bootstrap fragments build clients.
+        for address in [
+            "https+local://127.0.0.1/dns-query",
+            "https://dns.example/dns-query#127.0.0.1",
+            "tls+local://127.0.0.1:853",
+            "tls://tls.example#127.0.0.1,127.0.0.2",
+        ] {
+            let link =
+                parse_upstream(address, 0).unwrap_or_else(|error| panic!("{address}: {error:#}"));
+            assert!(
+                matches!(link, super::super::ServerLink::Encrypted(_)),
+                "{address} did not build an encrypted client"
+            );
+        }
+        // A routed domain endpoint without pins names the missing dialer.
+        let error = parse_upstream("https://dns.example/dns-query", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("runtime dialer"), "{error}");
+        // QUIC stays rejected by design; h2c names its gap.
+        assert!(parse_upstream("quic://dns.example", 0).is_err());
+        assert!(parse_upstream("h2c://dns.example", 0).is_err());
+        // The port field stays contradictory for URL servers.
+        assert!(parse_upstream("https+local://127.0.0.1/dns-query", 53).is_err());
+    }
+
+    /// An in-process DoH fixture: one TLS+h2 connection answering every
+    /// query with `answers`, recording each received question name.
+    async fn doh_fixture(
+        answers: Vec<IpAddr>,
+    ) -> (
+        crate::transport::tls::TlsSettings,
+        u16,
+        Arc<Mutex<Vec<String>>>,
+        JoinHandle<()>,
+    ) {
+        let (server_tls, client_tls) = encrypted_tls_pair("h2");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let logger = log.clone();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let acceptor =
+                tokio_rustls::TlsAcceptor::from(server_tls.build_server_config().unwrap());
+            let Ok(stream) = acceptor.accept(stream).await else {
+                return;
+            };
+            let Ok(mut connection) = h2::server::handshake(stream).await else {
+                return;
+            };
+            // The accept loop is the connection's driver; every request is
+            // answered and the loop keeps flushing frames until the client
+            // disconnects.
+            while let Some(Ok((request, mut respond))) = connection.accept().await {
+                let (_parts, mut body) = request.into_parts();
+                let mut query = Vec::new();
+                while let Some(chunk) = body.data().await {
+                    let chunk = chunk.unwrap();
+                    query.extend_from_slice(&chunk);
+                    body.flow_control().release_capacity(chunk.len()).unwrap();
+                }
+                eprintln!("DNSPROBE fixture got a {}-byte DoH query", query.len());
+                let request = wire::decode(&query).unwrap();
+                let question = request.questions[0].clone();
+                logger.lock().unwrap().push(question.name.clone());
+                let ips: Vec<IpAddr> = answers
+                    .iter()
+                    .copied()
+                    .filter(|ip| (question.record_type == RecordType::A) == ip.is_ipv4())
+                    .collect();
+                let payload =
+                    wire::encode_response(request.header.id, &question, &ips, 120, 0, None, 512)
+                        .unwrap();
+                if let Ok(mut send) = respond.send_response(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/dns-message")
+                        .header("content-length", payload.len())
+                        .body(())
+                        .unwrap(),
+                    false,
+                ) {
+                    let _ = send.send_data(bytes::Bytes::from(payload), true);
+                }
+            }
+        });
+        (client_tls, port, log, task)
+    }
+
+    #[tokio::test]
+    async fn encrypted_resolver_link_resolves_and_caches_through_doh() {
+        timeout(std::time::Duration::from_secs(10), async {
+            let (client_tls, port, log, server) = doh_fixture(vec![ip("192.0.2.7")]).await;
+            // The URL names the certificate's host; the bootstrap addresses
+            // pin the dial to the fixture's loopback address, exactly like
+            // `build_encrypted` handles Go's #ip fragment.
+            let endpoint = EncryptedEndpoint::parse(&format!(
+                "https+local://resolver.example:{port}/dns-query"
+            ))
+            .unwrap();
+            let mut config = EncryptedConfig::new(endpoint);
+            config.bootstrap = vec![ip("127.0.0.1")];
+            config.tls = client_tls;
+            config.timeout = std::time::Duration::from_secs(2);
+            let client = Arc::new(super::super::encrypted::EncryptedClient::new(config).unwrap());
+            let resolver = Resolver::new(ResolverConfig {
+                servers: vec![super::super::ServerLink::Encrypted(client)],
+                ..ResolverConfig::default()
+            })
+            .unwrap();
+            // DoH IDs are zero on the wire and restored per exchange.
+            let answer = resolver
+                .query("service.example", RecordType::A)
+                .await
+                .unwrap();
+            assert_eq!(answer.ips, vec![ip("192.0.2.7")]);
+            // The cached second lookup must not reach the fixture again.
+            let cached = resolver
+                .query("service.example", RecordType::A)
+                .await
+                .unwrap();
+            assert!(cached.from_cache);
+            assert_eq!(log.lock().unwrap().len(), 1);
+            server.abort();
+        })
+        .await
+        .unwrap();
+    }
+
+    fn encrypted_tls_pair(
+        alpn: &str,
+    ) -> (
+        crate::transport::tls::TlsSettings,
+        crate::transport::tls::TlsSettings,
+    ) {
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["resolver.example".into()]).unwrap();
+        let certificate: Vec<_> = cert.pem().lines().map(str::to_owned).collect();
+        let server = crate::transport::tls::TlsSettings {
+            alpn: vec![alpn.into()],
+            certificates: vec![crate::transport::tls::TlsCertificate {
+                certificate: certificate.clone(),
+                key: signing_key
+                    .serialize_pem()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let client = crate::transport::tls::TlsSettings {
+            disable_system_root: true,
+            certificates: vec![crate::transport::tls::TlsCertificate {
+                certificate,
+                usage: "verify".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        (server, client)
     }
 
     /// Local UDP DNS fixture: answers every query with `answers` filtered to
@@ -1202,10 +1457,8 @@ mod tests {
             serde_json::json!({"servers": ["192.0.2.1"], "queryStrategy": "UseSystem"}),
             serde_json::json!({"servers": [{"address": "192.0.2.1", "queryStrategy": "UseSystem"}]}),
             serde_json::json!({"servers": ["https://dns.example/dns-query"]}),
-            serde_json::json!({"servers": ["https+local://192.0.2.1/dns-query"]}),
             serde_json::json!({"servers": ["h2c://192.0.2.1/dns-query"]}),
             serde_json::json!({"servers": ["quic+local://192.0.2.1"]}),
-            serde_json::json!({"servers": ["tls+local://192.0.2.1"]}),
             serde_json::json!({"servers": ["fakedns"]}),
             serde_json::json!({"servers": ["localhost"]}),
             serde_json::json!({"servers": ["dns.example"]}),

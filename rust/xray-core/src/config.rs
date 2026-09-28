@@ -86,6 +86,78 @@ pub struct InboundConfig {
     pub settings: Value,
     #[serde(default)]
     pub stream_settings: StreamSettings,
+    /// The inbound's `sniffing` object (Go's proxyman ReceiverConfig
+    /// sniffing). Validated eagerly by `compile_inbound`; the runtime
+    /// compiles it via `runtime::sniffing::SniffingRequest::compile` — see
+    /// that module's contract doc for the wiring.
+    #[serde(default)]
+    pub sniffing: Option<SniffingConfig>,
+}
+
+/// Go's `SniffingConfig` (infra/conf/xray.go): the `sniffing` object of an
+/// inbound. The serde shape is exactly Go's keys — `enabled`,
+/// `destOverride`, `domainsExcluded`, `ipsExcluded`, `metadataOnly`,
+/// `routeOnly` — and unknown keys are rejected; every list accepts either a
+/// single string or an array, like Go's StringList. `destOverride` accepts
+/// "http", "tls"/"https"/"ssl" and "quic"; "fakedns"/"fakedns+others" fails
+/// explicitly (the fake DNS engine is not migrated).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct SniffingConfig {
+    pub enabled: bool,
+    #[serde(deserialize_with = "string_list")]
+    pub dest_override: Vec<String>,
+    #[serde(deserialize_with = "string_list")]
+    pub domains_excluded: Vec<String>,
+    #[serde(deserialize_with = "string_list")]
+    pub ips_excluded: Vec<String>,
+    pub metadata_only: bool,
+    pub route_only: bool,
+}
+
+impl SniffingConfig {
+    /// Go `SniffingConfig.Build` validation, at parse time: `destOverride`
+    /// must name a migrated sniffer (fakedns fails explicitly — it is not
+    /// migrated) and the exclusion lists must be legal domain/IP rules.
+    /// Runs even when sniffing is disabled, exactly like Go's Build.
+    pub(crate) fn validate(&self) -> Result<()> {
+        for protocol in &self.dest_override {
+            match protocol.to_ascii_lowercase().as_str() {
+                "http" | "tls" | "https" | "ssl" | "quic" => {}
+                "fakedns" | "fakedns+others" => bail!("fakedns sniffing is not migrated yet"),
+                other => bail!("unknown sniffing protocol {other:?}"),
+            }
+        }
+        if !self.domains_excluded.is_empty() || !self.ips_excluded.is_empty() {
+            let store = crate::geodata::GeoDataStore::from_env()?;
+            if !self.domains_excluded.is_empty() {
+                store.parse_domain_rules(
+                    &self.domains_excluded,
+                    crate::geodata::domain::Type::Substr,
+                )?;
+            }
+            if !self.ips_excluded.is_empty() {
+                store.parse_ip_rules(&self.ips_excluded)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Go's StringList: a single string or an array of strings.
+fn string_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Values {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+    Ok(match Values::deserialize(d)? {
+        Values::Single(value) => vec![value],
+        Values::Multiple(values) => values,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -117,14 +189,14 @@ pub struct MuxSettings {
 
 /// Stream limits of one Mux.Cool carrier connection (Go ClientStrategy).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PoolLimits {
+pub struct PoolLimits {
     pub max_concurrency: usize,
     pub max_connections: usize,
 }
 
 /// Go's `xudpProxyUDP443` policy for UDP/443 traffic on mux outbounds.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum Udp443Policy {
+pub enum Udp443Policy {
     #[default]
     Reject,
     Allow,
@@ -808,6 +880,9 @@ impl Config {
 pub(crate) fn compile_inbound(
     raw: &InboundConfig,
 ) -> Result<(Inbound, crate::transport::InboundTransport)> {
+    if let Some(sniffing) = &raw.sniffing {
+        sniffing.validate().context("inbound sniffing settings")?;
+    }
     let transport = raw.stream_settings.inbound_transport()?;
     let inbound = match raw.protocol.as_str() {
         "socks" => {

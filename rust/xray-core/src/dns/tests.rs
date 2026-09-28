@@ -39,7 +39,7 @@ fn answer(ips: Vec<IpAddr>, ttl: u32, response_code: u16) -> DnsAnswer {
 
 fn resolver(upstream: Upstream) -> Resolver {
     Resolver::new(ResolverConfig {
-        servers: vec![upstream],
+        servers: vec![ServerLink::Classic(upstream)],
         timeout: Duration::from_secs(2),
         ..ResolverConfig::default()
     })
@@ -611,7 +611,7 @@ async fn truncated_partial_udp_reply_can_retry_over_tcp() {
     let (listener, socket) = pair.expect("dual protocol socket reservation");
     let address = listener.local_addr().unwrap();
     let resolver = Resolver::new(ResolverConfig {
-        servers: vec![Upstream::udp(address)],
+        servers: vec![ServerLink::Classic(Upstream::udp(address))],
         tcp_fallback: true,
         timeout: Duration::from_secs(2),
         ..ResolverConfig::default()
@@ -674,7 +674,9 @@ async fn nxdomain_and_nodata_are_distinct_cacheable_results() {
 async fn query_times_out_and_disabled_udp_fallback_is_explicit() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let resolver = Resolver::new(ResolverConfig {
-        servers: vec![Upstream::udp(socket.local_addr().unwrap())],
+        servers: vec![ServerLink::Classic(Upstream::udp(
+            socket.local_addr().unwrap(),
+        ))],
         timeout: Duration::from_millis(40),
         ..ResolverConfig::default()
     })
@@ -685,7 +687,9 @@ async fn query_times_out_and_disabled_udp_fallback_is_explicit() {
     ));
     let truncated_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let resolver = Resolver::new(ResolverConfig {
-        servers: vec![Upstream::udp(truncated_socket.local_addr().unwrap())],
+        servers: vec![ServerLink::Classic(Upstream::udp(
+            truncated_socket.local_addr().unwrap(),
+        ))],
         timeout: Duration::from_secs(2),
         ..ResolverConfig::default()
     })

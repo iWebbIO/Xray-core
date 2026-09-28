@@ -267,8 +267,10 @@ pub(super) async fn serve(
             }
             response = reply_rx.recv() => {
                 let Some(response) = response else { continue; };
-                let Some(entry) = peers.get_mut(&response.key).filter(|peer| peer.id == response.id) else { continue; };
-                entry.last_activity = Instant::now();
+                if !response.xudp {
+                    let Some(entry) = peers.get_mut(&response.key).filter(|peer| peer.id == response.id) else { continue; };
+                    entry.last_activity = Instant::now();
+                }
                 idle_since = tokio::time::Instant::now();
                 if sends.len() >= limits.max_pending { counters.capacity_drops += 1; continue; }
                 let frame = UdpFrame::new(Destination::from(response.key.target), response.payload);

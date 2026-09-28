@@ -236,7 +236,7 @@ impl CompiledServer {
             return None;
         };
         Some(ResolverConfig {
-            servers: vec![upstream],
+            servers: vec![crate::dns::ServerLink::Classic(upstream)],
             timeout: self.timeout,
             cache: self.cache.clone(),
             client_ip: self.client_ip,
@@ -722,7 +722,11 @@ mod tests {
         assert!(!second.cache.serve_stale);
         assert_eq!(second.cache.max_stale, Duration::from_secs(4));
         let native = second.classic_resolver_config().unwrap();
-        assert_eq!(native.servers[0].address, "192.0.2.2:5353".parse().unwrap());
+        assert!(matches!(
+            native.servers[0],
+            crate::dns::ServerLink::Classic(upstream) if upstream.address
+                == "192.0.2.2:5353".parse().unwrap()
+        ));
         assert_eq!(native.client_ip, Some(ip("198.51.100.9")));
     }
 

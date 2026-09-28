@@ -212,7 +212,7 @@ impl Server {
             );
             outbound_tags.push(tag.clone());
         }
-        let mut listeners: Vec<(InboundListener, Inbound, String, InboundTransport)> = Vec::new();
+        let mut listeners: Vec<ListenerEntry> = Vec::new();
         // Startup inbound snapshots for the HandlerService registry, plus the
         // SS2022 UDP listeners that bind alongside their TCP listener.
         let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
@@ -231,7 +231,7 @@ impl Server {
                 Err(error) => {
                     // KCP owns a UDP receive task. Join every prior listener's
                     // close before returning so failed startup releases ports.
-                    for (listener, _, _, _) in listeners {
+                    for (listener, _, _, _, _) in listeners {
                         if let Err(close_error) = listener.close().await {
                             tracing::warn!(%close_error, "inbound rollback close failed");
                         }
@@ -241,7 +241,14 @@ impl Server {
             };
             addresses.push(listener.local_addr()?);
             seeds.push((raw.clone(), inbound.clone(), transport.clone()));
-            listeners.push((listener, inbound, raw.tag, transport));
+            // Go compiles the sniffing request per inbound handler; eager
+            // compilation surfaces geodata and rule errors before listening.
+            let sniff = sniffing::SniffingRequest::compile(
+                raw.sniffing.as_ref(),
+                &crate::geodata::GeoDataStore::from_env()?,
+            )
+            .with_context(|| format!("inbound {:?} sniffing", raw.tag))?;
+            listeners.push((listener, inbound, raw.tag, transport, sniff.map(Arc::new)));
         }
         let mut udp_listeners = Vec::new();
         for (raw, inbound, _) in &seeds {
@@ -256,7 +263,7 @@ impl Server {
                         // Release the already-bound TCP listeners before the
                         // failed startup propagates, exactly like a TCP bind
                         // failure inside the loop above.
-                        for (listener, _, _, _) in listeners {
+                        for (listener, _, _, _, _) in listeners {
                             if let Err(close_error) = listener.close().await {
                                 tracing::warn!(%close_error, "inbound rollback close failed");
                             }
@@ -404,12 +411,13 @@ impl Server {
                     });
                 }
             }
-            for (listener, inbound, tag, transport) in listeners {
+            for (listener, inbound, tag, transport, sniff) in listeners {
                 tasks.spawn(accept_loop(
                     listener,
                     inbound,
                     tag,
                     transport,
+                    sniff,
                     dispatcher.clone(),
                     stopping.clone(),
                 ));
@@ -477,6 +485,7 @@ async fn accept_loop(
     inbound: Inbound,
     tag: String,
     transport: InboundTransport,
+    sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
     dispatcher: Arc<Dispatcher>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -498,6 +507,7 @@ async fn accept_loop(
                     tag: tag.clone(),
                     dispatcher: dispatcher.clone(),
                     cancel: cancel.clone(),
+                    sniff: sniff.clone(),
                 };
                 let transport = transport.clone();
                 sessions.spawn(async move {
@@ -527,6 +537,7 @@ struct ConnectionContext {
     tag: Arc<str>,
     dispatcher: Arc<Dispatcher>,
     cancel: CancellationToken,
+    sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 }
 
 async fn handle_connection(
@@ -541,6 +552,7 @@ async fn handle_connection(
         tag,
         dispatcher,
         cancel,
+        sniff,
     } = context;
     let accepted = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
@@ -549,7 +561,17 @@ async fn handle_connection(
     match accepted {
         AcceptedTransport::Single(None) => Ok(()),
         AcceptedTransport::Single(Some(stream)) => {
-            handle_stream(stream, source, bound, &inbound, &tag, &dispatcher, &cancel).await
+            handle_stream(
+                stream,
+                source,
+                bound,
+                &inbound,
+                &tag,
+                &dispatcher,
+                &cancel,
+                sniff.as_ref().cloned(),
+            )
+            .await
         }
         AcceptedTransport::Grpc(mut server) => {
             // The H2 driver runs independently of accept(), so waiting for a
@@ -574,8 +596,9 @@ async fn handle_connection(
                         let tag = tag.clone();
                         let dispatcher = dispatcher.clone();
                         let cancel = stream_cancel.clone();
+                        let stream_sniff = sniff.clone();
                         streams.spawn(async move {
-                            if let Err(error) = handle_stream(accepted.stream.boxed(), source, bound, &inbound, &tag, &dispatcher, &cancel).await {
+                            if let Err(error) = handle_stream(accepted.stream.boxed(), source, bound, &inbound, &tag, &dispatcher, &cancel, stream_sniff).await {
                                 tracing::debug!(inbound = %tag, %source, error = %format!("{error:#}"), "gRPC logical stream closed");
                             }
                         });
@@ -589,6 +612,17 @@ async fn handle_connection(
     }
 }
 
+/// One bound inbound: its listener, compiled protocol/transport, tag and
+/// compiled sniffing request.
+type ListenerEntry = (
+    InboundListener,
+    Inbound,
+    String,
+    InboundTransport,
+    Option<std::sync::Arc<sniffing::SniffingRequest>>,
+);
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream(
     mut stream: BoxStream,
     source: SocketAddr,
@@ -597,6 +631,7 @@ async fn handle_stream(
     tag: &str,
     dispatcher: &Arc<Dispatcher>,
     cancel: &CancellationToken,
+    sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 ) -> Result<()> {
     let policy = dispatcher.policy.for_level(0);
     if let Some(stats) = &dispatcher.stats {
@@ -638,7 +673,7 @@ async fn handle_stream(
         }
     };
     dispatch_request(
-        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy,
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy, sniff,
     )
     .await
 }
@@ -662,6 +697,7 @@ async fn dispatch_request(
     request: protocol::Request,
     vision: Option<[u8; 16]>,
     policy: crate::features::policy::SessionPolicy,
+    sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 ) -> Result<()> {
     // A request whose destination address is v1.mux.cool turns the
     // connection body into a Mux.Cool carrier. The carrier runs on its own
@@ -696,6 +732,7 @@ async fn dispatch_request(
                 source,
                 stream,
                 &carrier_cancel,
+                sniff.clone(),
             ));
             carrier.await
         });
@@ -705,7 +742,7 @@ async fn dispatch_request(
         };
     }
     dispatch_common(
-        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy,
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy, sniff,
     )
     .await
 }
@@ -721,10 +758,42 @@ async fn dispatch_common(
     tag: &str,
     dispatcher: &Arc<Dispatcher>,
     cancel: &CancellationToken,
-    request: protocol::Request,
+    mut request: protocol::Request,
     vision: Option<[u8; 16]>,
     policy: crate::features::policy::SessionPolicy,
+    sniff: Option<std::sync::Arc<sniffing::SniffingRequest>>,
 ) -> Result<()> {
+    // Go's dispatcher sniffs the connection before routing: the payload is
+    // peeked within Go's budget and replayed into the relay; destOverride
+    // replaces the routed (and, without routeOnly, the dialed) destination
+    // with the sniffed domain. A failed sniff relays unchanged.
+    let mut sniffed_protocol = None;
+    let mut route_destination = request.destination.clone();
+    if let Some(sniff) = sniff.as_ref() {
+        let (wrapped, result) = sniffing::sniff(
+            stream,
+            sniffing::Network::Tcp,
+            sniff.metadata_only,
+            sniffing::SniffLimits::default(),
+        )
+        .await;
+        stream = Box::new(wrapped);
+        if let Some(result) = result {
+            sniffed_protocol = Some(result.protocol);
+            if let Some(override_) = sniff.destination_override(&result, &request.destination) {
+                if override_.route_only {
+                    // routeOnly: the router sees the sniffed domain, the
+                    // outbound dials the original target (Go's RouteTarget).
+                    route_destination.address = crate::address::Address::Domain(override_.domain);
+                } else {
+                    // Go's Target: the sniffed domain replaces routing AND
+                    // dialing.
+                    request.destination.address = crate::address::Address::Domain(override_.domain);
+                    route_destination = request.destination.clone();
+                }
+            }
+        }
+    }
     let exchange = async {
         let idle_since = Instant::now();
         anyhow::ensure!(
@@ -734,13 +803,16 @@ async fn dispatch_common(
         let user_stats = dispatcher.stats.as_ref().map(|stats| {
             stats.user_session(&request.user, &source_ip_string(source), policy.stats)
         });
-        let (selected, routed) = dispatcher.router.select_with_route(&RouteContext {
-            destination: &request.destination,
-            source,
-            inbound_tag: tag,
-            user: &request.user,
-            network: "tcp",
-        });
+        let (selected, routed) = dispatcher.router.select_with_route_sniffed(
+            &RouteContext {
+                destination: &route_destination,
+                source,
+                inbound_tag: tag,
+                user: &request.user,
+                network: "tcp",
+            },
+            sniffed_protocol,
+        );
         // Portal indexes sit beyond the real outbounds (the routing-only
         // reverse entries); they dispatch through the reverse app.
         let portal_selected = selected >= dispatcher.outbounds.len();
