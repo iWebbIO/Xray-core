@@ -38,10 +38,12 @@ impl RoutedProbeDialer for ObservatoryDialer {
             .transports
             .get(index)
             .context("observatory outbound transport unavailable")?;
-        let resolved = match admission::admit(outbound, "observatory", target).await? {
-            Admission::Allowed(addresses) => addresses,
-            Admission::Blocked(_) => bail!("freedom final rule blocked observatory target"),
-        };
+        let resolved =
+            match admission::admit(outbound, "observatory", target, dispatcher.dns.as_ref()).await?
+            {
+                Admission::Allowed(addresses) => addresses,
+                Admission::Blocked(_) => bail!("freedom final rule blocked observatory target"),
+            };
         let counters = dispatcher
             .stats
             .as_ref()
@@ -52,8 +54,15 @@ impl RoutedProbeDialer for ObservatoryDialer {
         // The observer owns the full five-second deadline and cancellation,
         // including this future, outer transport security and proxy handshakes.
         // HTTPS for the probe origin is applied by the observer after return.
-        let (stream, _) =
-            establish(outbound, transport, target, resolved.as_deref(), counters).await?;
+        let (stream, _) = establish(
+            dispatcher,
+            outbound,
+            transport,
+            target,
+            resolved.as_deref(),
+            counters,
+        )
+        .await?;
         Ok(stream)
     }
 }

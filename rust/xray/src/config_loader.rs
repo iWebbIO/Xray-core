@@ -4,10 +4,29 @@
 //! JSON/JSONC, YAML, TOML and single-file protobuf inputs are supported. Binary
 //! protobuf input stays bytes until native decoding. Remote HTTP/Unix-socket
 //! inputs fail explicitly here.
-//! YAML uses the parser's YAML 1.2 scalar resolution: unlike Go's YAML 1.1
-//! decoder, unquoted `yes`, `no`, `on` and `off` remain strings. Quoted strings
-//! are never heuristically converted. Unknown configuration fields are retained
-//! for the downstream validator, including fields outside today's Rust models.
+//!
+//! YAML inputs follow Go's YAML 1.1 plain-scalar semantics: Go's
+//! `serial.DecodeYAMLConfig` (infra/conf/serial/loader.go) converts YAML
+//! through ghodss/yaml, which wraps gopkg.in/yaml.v2. Unquoted
+//! `yes`/`no`/`on`/`off`/`y`/`n` resolve to booleans and the YAML-1.1-only
+//! number forms (`1_000`, `010`, `0X1F`, `.5_0`, `12.`) resolve exactly like
+//! Go; quoted scalars that YAML 1.2 itself would resolve (`"true"`, `"8080"`,
+//! `"0x1F"`) stay strings like Go. The quote style of YAML-1.1-only scalars is
+//! lost once parsed, so a quoted `yes` normalizes like the plain form - the
+//! documented deviation of the post-parse normalization in
+//! `xray_core::config::yaml_compat`. JSON/JSONC and TOML inputs never receive
+//! YAML scalar resolution, matching Go's separate `DecodeJSONConfig` and
+//! `DecodeTOMLConfig` loaders.
+//!
+//! The root `env` object is handled like Go's `EnvConfig` (infra/conf/xray.go):
+//! merged across config files with later files winning (`EnvConfig.Override`),
+//! then consumed at the end of loading exactly where Go's `Config.Build`
+//! applies it with `os.Setenv` before building every sub-config. Go performs
+//! no `${VAR}` substitution of config values in any format, so such text
+//! passes through literally here as well; installing the consumed entries
+//! into the process environment belongs to the runtime caller that owns it.
+//! Unknown configuration fields are retained for the downstream validator,
+//! including fields outside today's Rust models.
 
 mod remote;
 use std::{
@@ -19,6 +38,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Number, Value};
+use xray_core::config::yaml_compat::{apply_env, normalize_yaml_scalars};
 
 /// Command-line inputs. Repeated config paths retain their original order;
 /// matching confdir entries are sorted and appended after them.
@@ -42,8 +62,9 @@ impl Default for LoadOptions {
     }
 }
 
-/// Load raw configuration values. This does not apply the `env` section or
-/// deserialize a runtime `Config`; those operations belong to the caller.
+/// Load raw configuration values. The merged root `env` section is consumed
+/// like Go's `Config.Build` consumes it (after `EnvConfig.Override` merging);
+/// deserializing a runtime `Config` from the result belongs to the caller.
 pub fn load(options: &LoadOptions) -> Result<Value> {
     let environment = LoadEnvironment::current();
     load_with(options, &environment, &mut std::io::stdin().lock())
@@ -265,7 +286,19 @@ fn load_with(
             merged = Some(document);
         }
     }
-    merged.context("no configuration files found")
+    let mut merged = merged.context("no configuration files found")?;
+    // Go consumes the merged root "env" map exactly once, in
+    // infra/conf.Config.Build, after EnvConfig.Override has merged it across
+    // the files above; Go then applies each entry with os.Setenv before
+    // building any sub-config and performs no ${VAR} substitution anywhere.
+    // Mirror the consumption point: valid sections are removed (installing
+    // them into the process environment belongs to the runtime caller;
+    // std::env::set_var is unavailable under this workspace's no-unsafe
+    // rule), invalid ones stay for the downstream config parse to reject
+    // like Go's map[string]string decode. The lookup reports each entry's
+    // previous value with os.Getenv semantics.
+    apply_env(&mut merged, &|name| std::env::var(name).ok());
+    Ok(merged)
 }
 
 fn decode_bytes(input: &[u8], format: Format, strict_json: bool) -> Result<Value> {
@@ -300,7 +333,13 @@ fn decode(input: &str, format: Format, strict_json: bool) -> Result<Value> {
             let mut value: serde_yaml::Value =
                 serde_yaml::from_str(input).context("invalid YAML")?;
             value.apply_merge().context("invalid YAML merge key")?;
-            yaml_to_json(value)?
+            let mut value = yaml_to_json(value)?;
+            // Go's DecodeYAMLConfig converts YAML through ghodss/yaml
+            // (gopkg.in/yaml.v2), whose plain scalars follow YAML 1.1;
+            // serde_yaml 0.9 resolves YAML 1.2. Restore Go's resolution
+            // on the converted tree; JSON and TOML never pass through it.
+            normalize_yaml_scalars(&mut value);
+            value
         }
         Format::Toml => toml_to_json(input.parse::<toml::Value>().context("invalid TOML")?)?,
         Format::Protobuf => bail!("protobuf configuration must be decoded from bytes"),
@@ -561,21 +600,27 @@ mod tests {
     #[test]
     fn yaml_aliases_merge_keys_and_numeric_policy_keys() {
         let value = decode(
-            "defaults: &d {handshake: 4, connIdle: 20}\npolicy:\n  levels:\n    0:\n      <<: *d\n      connIdle: 30\nquoted: 'on'\nboolean: true\n",
+            "defaults: &d {handshake: 4, connIdle: 20}\npolicy:\n  levels:\n    0:\n      <<: *d\n      connIdle: 30\nplain: on\nquoted: 'true'\ndeviatingQuoted: 'on'\nboolean: true\n",
             Format::Yaml, false,
         ).unwrap();
         assert_eq!(
             value["policy"]["levels"]["0"],
             json!({"handshake":4,"connIdle":30})
         );
-        assert_eq!(value["quoted"], "on");
+        // Go's YAML decoder (ghodss/yaml wrapping yaml.v2, YAML 1.1) resolves
+        // the plain `on` to true; quoted scalars that YAML 1.2 itself would
+        // resolve stay strings, exactly like Go.
+        assert_eq!(value["plain"], true);
+        assert_eq!(value["quoted"], "true");
+        // Documented deviation: the quote style of YAML-1.1-only scalars is
+        // lost after parsing (see xray_core::config::yaml_compat), so the
+        // quoted 'on' normalizes like the plain form; Go keeps the string.
+        assert_eq!(value["deviatingQuoted"], true);
         assert_eq!(value["boolean"], true);
-        // Deliberately record the remaining YAML 1.1 compatibility boundary.
-        assert_eq!(
-            decode("value: on", Format::Yaml, false).unwrap()["value"],
-            "on"
-        );
+        // Non-finite scalars are rejected by both decoders before any config
+        // decoding happens (Go's json.Marshal refuses them).
         assert!(decode("value: .nan", Format::Yaml, false).is_err());
+        assert!(decode("value: .inf", Format::Yaml, false).is_err());
     }
 
     #[test]
@@ -705,7 +750,7 @@ mod tests {
     #[test]
     fn mixed_formats_append_sorted_confdir_after_repeated_config_paths() {
         let files = Fixtures::new();
-        let first = files.write("first.jsonc", r#"{/*local*/"env":{"KEEP":"yes","ORDER":"first"},"outbounds":[{"tag":"first"}],"futureFeature":{"retained":true}}"#);
+        let first = files.write("first.jsonc", r#"{/*local*/"env":{"KEEP":"yes","ORDER":"first"},"outbounds":[{"tag":"first"}],"futureFeature":{"retained":true,"yes":"yes","on":"off"}}"#);
         let second = files.write(
             "second.yaml",
             "env: {ORDER: second}\noutbounds: [{tag: second}]\n",
@@ -734,8 +779,289 @@ mod tests {
             tags(&value, "outbounds"),
             ["middle", "second", "first", "last"]
         );
-        assert_eq!(value["env"], json!({"KEEP":"yes","ORDER":"last"}));
+        // The env section merged across all four files (later files win,
+        // like EnvConfig.Override) is consumed exactly where Go's
+        // Config.Build consumes it.
+        assert!(value.get("env").is_none());
         assert_eq!(value["futureFeature"]["retained"], true);
+        // JSON strings never receive the YAML scalar normalization.
+        assert_eq!(value["futureFeature"]["yes"], "yes");
+        assert_eq!(value["futureFeature"]["on"], "off");
+    }
+
+    #[test]
+    fn yaml_files_load_with_go_yaml_11_scalar_semantics() {
+        let files = Fixtures::new();
+        let config = files.write(
+            "config.yaml",
+            "plainBooleans:\n  flow: [yes, Yes, YES, y, Y, no, No, NO, n, N, on, On, ON, off, Off, OFF]\n  agreed: [true, True, TRUE, false, False, FALSE]\n  kept: [TrUe, y2]\nnumbers:\n  underscores: [1_000, 1__0, 0x_1F, -_5]\n  octal: [010, 0777, -010, 08, 00]\n  upperPrefix: [0X1F, 0O17, 0B101]\n  floats: [.5_0, 1.5_0, 12., 5.e2, 1e3]\nstrings:\n  timestamps: [2022-01-01, 2022-01-01T10:30:00Z]\n  sexagesimal: [190:20:30, 12:30]\n  overflow: [1e400, 0x, _1]\n",
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![config],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        // Plain-scalar goldens from Go's ghodss/yaml (gopkg.in/yaml.v2)
+        // decoder; the same table is verified in xray_core::config::yaml_compat.
+        assert_eq!(
+            value["plainBooleans"]["flow"],
+            json!([
+                true, true, true, true, true, false, false, false, false, false, true, true, true,
+                false, false, false
+            ])
+        );
+        assert_eq!(
+            value["plainBooleans"]["agreed"],
+            json!([true, true, true, false, false, false])
+        );
+        assert_eq!(value["plainBooleans"]["kept"], json!(["TrUe", "y2"]));
+        assert_eq!(value["numbers"]["underscores"], json!([1000, 10, 31, -5]));
+        assert_eq!(value["numbers"]["octal"], json!([8, 511, -8, 8, 0]));
+        assert_eq!(value["numbers"]["upperPrefix"], json!([31, 15, 5]));
+        assert_eq!(value["numbers"]["floats"], json!([0.5, 1.5, 12, 500, 1000]));
+        // yaml.v2 keeps timestamp-like and sexagesimal scalars as strings
+        // when decoding into interface{} (ghodss/yaml's mode), and Go's
+        // ParseFloat rejects 1e400, so it stays a string too.
+        assert_eq!(
+            value["strings"]["timestamps"],
+            json!(["2022-01-01", "2022-01-01T10:30:00Z"])
+        );
+        assert_eq!(
+            value["strings"]["sexagesimal"],
+            json!(["190:20:30", "12:30"])
+        );
+        assert_eq!(value["strings"]["overflow"], json!(["1e400", "0x", "_1"]));
+    }
+
+    #[test]
+    fn yaml_quoted_scalars_stay_strings_except_yaml11_only_forms() {
+        let files = Fixtures::new();
+        let config = files.write(
+            "quoted.yaml",
+            "quoted:\n  bool: \"true\"\n  number: \"8080\"\n  hex: \"0x1F\"\n  exp: \"1e3\"\n  dot: \".5\"\n  signed: \"+5\"\n  nullish: \"null\"\n  tilde: \"~\"\n  empty: \"\"\n  infinite: \".inf\"\n  yes11: \"yes\"\n  underscore11: \"1_000\"\n",
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![config],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        // Quoted scalars are strings in Go; every form listed here is one
+        // serde_yaml 0.9 would itself resolve, so normalization preserves it.
+        for key in [
+            "bool", "number", "hex", "exp", "dot", "signed", "nullish", "tilde", "empty",
+            "infinite",
+        ] {
+            assert!(value["quoted"][key].is_string(), "{key} must stay a string");
+        }
+        assert_eq!(value["quoted"]["bool"], json!("true"));
+        assert_eq!(value["quoted"]["number"], json!("8080"));
+        assert_eq!(value["quoted"]["hex"], json!("0x1F"));
+        assert_eq!(value["quoted"]["empty"], json!(""));
+        // Documented deviation (see xray_core::config::yaml_compat): quote
+        // information is lost for YAML-1.1-only scalars, so these normalize
+        // like their plain forms even though Go keeps the quoted strings.
+        assert_eq!(value["quoted"]["yes11"], json!(true));
+        assert_eq!(value["quoted"]["underscore11"], json!(1000));
+    }
+
+    #[test]
+    fn env_sections_merge_across_formats_and_are_consumed_without_expansion() {
+        let files = Fixtures::new();
+        let base = files.write(
+            "base.yaml",
+            "env:\n  XRAY_LOADER_TEST_SET: configured\n  XRAY_LOADER_TEST_NULL:\nlog:\n  loglevel: \"${XRAY_LOADER_TEST_SET}\"\n  unset: \"${XRAY_LOADER_TEST_ABSENT}\"\n  fallback: \"${XRAY_LOADER_TEST_ABSENT:-default}\"\n",
+        );
+        let overlay = files.write(
+            "overlay.json",
+            r#"{"env":{"XRAY_LOADER_TEST_SET":"later"}}"#,
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![base, overlay],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        // The merged env object (later files win per key, nulls decode like
+        // Go's empty strings) is consumed exactly where Go's Config.Build
+        // consumes it, for every config format alike.
+        assert!(value.get("env").is_none());
+        // Go performs no ${VAR} substitution anywhere: the text stays literal
+        // whether the variable is defined by the config's own env section
+        // (Go os.Setenvs it during Build) or absent from the environment.
+        assert_eq!(value["log"]["loglevel"], json!("${XRAY_LOADER_TEST_SET}"));
+        assert_eq!(value["log"]["unset"], json!("${XRAY_LOADER_TEST_ABSENT}"));
+        assert_eq!(
+            value["log"]["fallback"],
+            json!("${XRAY_LOADER_TEST_ABSENT:-default}")
+        );
+    }
+
+    #[test]
+    fn invalid_env_sections_stay_for_downstream_rejection_like_go() {
+        let files = Fixtures::new();
+        // Go's json.Unmarshal into map[string]string rejects all of these;
+        // the loader leaves them in place so the downstream config parse
+        // rejects the document the same way.
+        for (name, contents) in [
+            ("number.yaml", "env: {A: 1}\n"),
+            ("bool.yaml", "env: {A: true}\n"),
+            ("array.yaml", "env: [1]\n"),
+            ("string.yaml", "env: x\n"),
+        ] {
+            let config = files.write(name, contents);
+            let value = run(
+                &LoadOptions {
+                    configs: vec![config],
+                    ..Default::default()
+                },
+                &LoadEnvironment::default(),
+                "",
+            )
+            .unwrap();
+            assert!(
+                value.get("env").is_some(),
+                "{name}: invalid env must stay for rejection"
+            );
+        }
+        // Null (Go's nil map) and empty env sections are valid and consumed.
+        for contents in ["env:\n", "env: {}\n"] {
+            let config = files.write("valid.yaml", contents);
+            let value = run(
+                &LoadOptions {
+                    configs: vec![config],
+                    ..Default::default()
+                },
+                &LoadEnvironment::default(),
+                "",
+            )
+            .unwrap();
+            assert!(
+                value.get("env").is_none(),
+                "{contents:?}: valid env must be consumed"
+            );
+        }
+        // Only the root env object is Go's EnvConfig; nested env keys are
+        // ordinary settings and must be left alone.
+        let nested = files.write(
+            "nested.yaml",
+            "inbounds:\n- protocol: socks\n  settings:\n    env: {A: nested}\n",
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![nested],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            value["inbounds"][0]["settings"]["env"]["A"],
+            json!("nested")
+        );
+    }
+
+    #[test]
+    fn nested_yaml_document_matches_go_yaml_to_json_output() {
+        let files = Fixtures::new();
+        let config = files.write(
+            "sample.yaml",
+            "log: info\nenv:\n  XRAY_LOADER_TEST_ENV: configured\ninbounds:\n- listen: 0.0.0.0\n  port: 1080\n  protocol: socks\n  settings:\n    udp: true\n    auth: no\nstreamSettings:\n  network: tcp\n  security: tls\n  tlsSettings:\n    allowInsecure: false\n    alpn: [h2, http/1.1]\noutbounds:\n- protocol: vmess\n  settings:\n    vnext:\n    - address: example.com\n      port: 443\n      users:\n      - id: b831381d-6324-4d53-ad4f-8cda48b30811\n        alterId: 0\n        security: auto\n",
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![config],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        // Golden: Go's ghodss/yaml YAMLToJSON output for the same document
+        // (verified in xray_core::config::yaml_compat's round-trip test),
+        // with the env section consumed like Config.Build consumes it and
+        // the YAML 1.1 `auth: no` resolved to false.
+        let expected = json!({
+            "log": "info",
+            "inbounds": [{
+                "listen": "0.0.0.0",
+                "port": 1080,
+                "protocol": "socks",
+                "settings": {"auth": false, "udp": true}
+            }],
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {"allowInsecure": false, "alpn": ["h2", "http/1.1"]}
+            },
+            "outbounds": [{
+                "protocol": "vmess",
+                "settings": {"vnext": [{
+                    "address": "example.com",
+                    "port": 443,
+                    "users": [{
+                        "id": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                        "alterId": 0,
+                        "security": "auto"
+                    }]
+                }]}
+            }]
+        });
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn json_and_toml_inputs_keep_native_scalar_semantics() {
+        let files = Fixtures::new();
+        // Go's DecodeJSONConfig applies no YAML resolution: JSON strings stay
+        // strings, independent of the JSONC comment stripping.
+        let jsonc = files.write(
+            "strings.jsonc",
+            r#"{/*comment*/ "yes":"yes","on":"off","underscore":"1_000","octal":"010"}"#,
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![jsonc],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        assert_eq!(value["yes"], json!("yes"));
+        assert_eq!(value["on"], json!("off"));
+        assert_eq!(value["underscore"], json!("1_000"));
+        assert_eq!(value["octal"], json!("010"));
+        // TOML likewise (DecodeTOMLConfig converts to JSON and re-decodes),
+        // and its env section is consumed like every other format's.
+        let toml = files.write(
+            "native.toml",
+            "yes = 'yes'\nnum = 1000\nflag = true\n[env]\nA = 'x'\n",
+        );
+        let value = run(
+            &LoadOptions {
+                configs: vec![toml],
+                ..Default::default()
+            },
+            &LoadEnvironment::default(),
+            "",
+        )
+        .unwrap();
+        assert_eq!(value["yes"], json!("yes"));
+        assert_eq!(value["num"], json!(1000));
+        assert_eq!(value["flag"], json!(true));
+        assert!(value.get("env").is_none());
     }
 
     #[test]

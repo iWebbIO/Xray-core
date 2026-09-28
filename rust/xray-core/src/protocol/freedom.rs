@@ -2,6 +2,7 @@
 //! Resolve once and dial only checked addresses to avoid a DNS check/dial race.
 use crate::{
     address::{Address, Destination},
+    dns::QueryOptions,
     geodata::{GeoDataStore, IpMatcher},
     router::{PortSpec, Ports},
 };
@@ -64,9 +65,10 @@ struct Rule {
 pub struct FinalRules(Vec<Rule>);
 
 /// Freedom `domainStrategy` from `infra/conf/freedom.go`, matched
-/// case-insensitively. Resolution behavior for the non-AsIs strategies lands
-/// with the DNS-app runtime wiring; until then those strategies fail
-/// explicitly at dial time instead of silently dialing by domain.
+/// case-insensitively. The non-AsIs strategies resolve the target through the
+/// configured DNS app (or the system resolver when no `dns` app exists) in
+/// `runtime/admission.rs`, following proxy/freedom/freedom.go and
+/// transport/internet's `LookupForIP`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DomainStrategy {
     #[default]
@@ -100,8 +102,46 @@ impl DomainStrategy {
             other => anyhow::bail!("unsupported domain strategy: {other}"),
         })
     }
+
+    /// Go `DomainStrategy.HasStrategy`: every strategy but `AsIs` resolves.
+    pub(crate) fn has_strategy(self) -> bool {
+        !matches!(self, Self::AsIs)
+    }
+
+    /// Query families of the first lookup, from Go's `strategy` table columns
+    /// (`PreferIP4`/`PreferIP6`): the `*IP`/`*IPv6`-only strategies enable one
+    /// family, `UseIP`/`ForceIP` enable both, and the pair strategies enable
+    /// their preferred family first.
+    pub(crate) fn preferred_families(self) -> QueryOptions {
+        match self {
+            Self::AsIs | Self::UseIp | Self::ForceIp => QueryOptions::BOTH,
+            Self::UseIp4 | Self::UseIp46 | Self::ForceIp4 | Self::ForceIp46 => QueryOptions::IPV4,
+            Self::UseIp6 | Self::UseIp64 | Self::ForceIp6 | Self::ForceIp64 => QueryOptions::IPV6,
+        }
+    }
+
+    /// Second-lookup families when the first yields nothing (Go `HasFallback`
+    /// with `FallbackIP4`/`FallbackIP6`); the pair strategies fall back to the
+    /// other family, everything else has no fallback.
+    pub(crate) fn fallback_families(self) -> Option<QueryOptions> {
+        match self {
+            Self::UseIp46 | Self::ForceIp46 => Some(QueryOptions::IPV6),
+            Self::UseIp64 | Self::ForceIp64 => Some(QueryOptions::IPV4),
+            _ => None,
+        }
+    }
+
+    /// Go `ForceIP`: the connection fails when resolution yields nothing
+    /// instead of dialing by domain.
+    pub(crate) fn is_force(self) -> bool {
+        matches!(
+            self,
+            Self::ForceIp | Self::ForceIp4 | Self::ForceIp6 | Self::ForceIp46 | Self::ForceIp64
+        )
+    }
 }
 
+#[derive(Debug)]
 pub enum Admission {
     Allowed(Option<Vec<SocketAddr>>),
     Blocked(Duration),
@@ -193,6 +233,14 @@ impl FinalRules {
                 .context("resolve freedom final-rule target")?
                 .collect::<Vec<_>>(),
         };
+        self.admit_resolved(inbound, addresses)
+    }
+
+    /// Final-rule scan over already-resolved addresses — the system-resolved
+    /// `AsIs` path above and the `domainStrategy` resolution in
+    /// `runtime/admission.rs`. One blocked address blocks the connection;
+    /// blocked answers are never skipped to find a permitted one.
+    pub fn admit_resolved(&self, inbound: &str, addresses: Vec<SocketAddr>) -> Result<Admission> {
         ensure!(
             !addresses.is_empty(),
             "freedom target resolved to no addresses"
@@ -246,6 +294,56 @@ fn private_ip(mut ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn domain_strategy_table_matches_go() {
+        // (strategy, preferred families, fallback, force) per Go's
+        // `strategy` table in transport/internet/config.go.
+        for (name, preferred, fallback, force) in [
+            ("AsIs", None, None, false),
+            ("UseIP", Some(QueryOptions::BOTH), None, false),
+            ("UseIPv4", Some(QueryOptions::IPV4), None, false),
+            ("UseIPv6", Some(QueryOptions::IPV6), None, false),
+            (
+                "UseIPv4v6",
+                Some(QueryOptions::IPV4),
+                Some(QueryOptions::IPV6),
+                false,
+            ),
+            (
+                "UseIPv6v4",
+                Some(QueryOptions::IPV6),
+                Some(QueryOptions::IPV4),
+                false,
+            ),
+            ("ForceIP", Some(QueryOptions::BOTH), None, true),
+            ("ForceIPv4", Some(QueryOptions::IPV4), None, true),
+            ("ForceIPv6", Some(QueryOptions::IPV6), None, true),
+            (
+                "ForceIPv4v6",
+                Some(QueryOptions::IPV4),
+                Some(QueryOptions::IPV6),
+                true,
+            ),
+            (
+                "ForceIPv6v4",
+                Some(QueryOptions::IPV6),
+                Some(QueryOptions::IPV4),
+                true,
+            ),
+        ] {
+            let strategy = DomainStrategy::parse(name).unwrap();
+            assert_eq!(strategy.has_strategy(), name != "AsIs", "{name}");
+            assert_eq!(
+                strategy.preferred_families(),
+                preferred.unwrap_or(QueryOptions::BOTH),
+                "{name}"
+            );
+            assert_eq!(strategy.fallback_families(), fallback, "{name}");
+            assert_eq!(strategy.is_force(), force, "{name}");
+        }
+        assert_eq!(DomainStrategy::parse("asis").unwrap(), DomainStrategy::AsIs);
+        assert!(DomainStrategy::parse("UseSystem").is_err());
+    }
     #[test]
     fn default_is_source_protocol_dependent_and_covers_mapped_ips() {
         let rules = FinalRules::default();

@@ -676,6 +676,24 @@ impl Config {
                 stream_settings: StreamSettings::default(),
             });
         }
+        // Reverse portal tags are routing outbounds exactly like Go's portal
+        // handlers in the outbound manager (app/reverse/portal.go Start), so
+        // routing rules may select them.
+        if let Some(reverse) = &reverse {
+            for portal in &reverse.portals {
+                ensure!(
+                    !outbound_tags.contains(portal.tag.as_str()),
+                    "reverse portal tag {:?} conflicts with another outbound tag",
+                    portal.tag
+                );
+                routing_outbounds.push(OutboundConfig {
+                    tag: portal.tag.clone(),
+                    protocol: "reverse-portal".into(),
+                    settings: empty_object(),
+                    stream_settings: StreamSettings::default(),
+                });
+            }
+        }
         let router = Router::compile(&self.routing, &routing_outbounds)?;
         Ok(ValidatedConfig {
             observatory,

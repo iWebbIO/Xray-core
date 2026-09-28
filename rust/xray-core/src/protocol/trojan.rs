@@ -15,6 +15,9 @@ use super::{Reply, Request};
 use crate::address::{Address, Destination};
 
 const TCP_COMMAND: u8 = 1;
+/// `commandUDP` in Go's `proxy/trojan/protocol.go`: UDP over the very Trojan
+/// connection that carried the request header.
+const UDP_COMMAND: u8 = 3;
 const CRLF: [u8; 2] = *b"\r\n";
 
 #[derive(Clone)]
@@ -76,10 +79,14 @@ pub async fn read_request<R: AsyncRead + Unpin>(
         .await
         .context("Trojan authentication CRLF")?;
     let command = reader.read_u8().await.context("read Trojan command")?;
+    // Go's `ParseHeader` maps command 3 to the UDP network and parses the
+    // request address identically for both commands; every other command is
+    // rejected (Go never validates more about UDP requests than TCP ones).
     ensure!(
-        command == TCP_COMMAND,
-        "unsupported Trojan command {command}; only TCP is implemented"
+        command == TCP_COMMAND || command == UDP_COMMAND,
+        "unsupported Trojan command {command}; only TCP (1) and UDP (3) are implemented"
     );
+    let udp = command == UDP_COMMAND;
     let mut destination = Destination::read_socks(reader)
         .await
         .context("read Trojan destination")?;
@@ -100,15 +107,13 @@ pub async fn read_request<R: AsyncRead + Unpin>(
     }
     read_crlf(reader).await.context("Trojan destination CRLF")?;
     Ok(Accepted {
-        // Command 3 (UDP over Trojan) still fails explicitly above until the
-        // `trojan_udp` runtime wiring lands; `udp` is therefore always false.
         request: Request {
             destination,
             user: account.email.clone(),
             initial_payload: Vec::new(),
             reply: Reply::None,
         },
-        udp: false,
+        udp,
     })
 }
 
@@ -152,9 +157,15 @@ mod tests {
     // "test string". The independently fixed SHA224 digest and framing below
     // also verify our writer without round-tripping through our own reader.
     fn request_fixture(address: &[u8]) -> Vec<u8> {
+        command_fixture(address, b"\x01")
+    }
+
+    /// The same Go wire shape with an arbitrary command byte (3 = UDP).
+    fn command_fixture(address: &[u8], command: &[u8; 1]) -> Vec<u8> {
         [
             PASSWORD_HASH.as_slice(),
-            b"\r\n\x01",
+            b"\r\n",
+            command.as_slice(),
             address,
             b"\x04\xd2\r\n",
         ]
@@ -213,6 +224,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn go_udp_wire_fixture_accepts_command_three() {
+        for (host, address) in [
+            ("127.0.0.1", vec![1, 127, 0, 0, 1]),
+            (
+                "example.com",
+                [vec![3, 11], b"example.com".to_vec()].concat(),
+            ),
+            ("::1", [vec![4], vec![0; 15], vec![1]].concat()),
+        ] {
+            // hash | CRLF | command 3 | SOCKS address | CRLF, the exact Go
+            // `ParseHeader` wire for a UDP-over-Trojan request.
+            let fixture = command_fixture(&address, b"\x03");
+            let accepted = read_request(&mut fixture.as_slice(), &[account()])
+                .await
+                .unwrap();
+            assert!(
+                accepted.udp,
+                "command 3 must mark the request as a UDP association"
+            );
+            assert_eq!(
+                accepted.request.destination,
+                Destination::new(host, 1234).unwrap()
+            );
+            assert_eq!(accepted.request.user, "love@example.com");
+            for length in 0..fixture.len() {
+                assert!(
+                    read_request(&mut &fixture[..length], &[account()])
+                        .await
+                        .is_err(),
+                    "accepted truncated {host} UDP request of length {length}"
+                );
+            }
+        }
+        // Command 1 keeps meaning TCP.
+        let fixture = command_fixture(&[1, 127, 0, 0, 1], b"\x01");
+        assert!(
+            !read_request(&mut fixture.as_slice(), &[account()])
+                .await
+                .unwrap()
+                .udp
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_bad_credentials_delimiters_commands_and_addresses() {
         let fixture = request_fixture(&[1, 127, 0, 0, 1]);
         assert!(read_request(&mut fixture.as_slice(), &[]).await.is_err());
@@ -228,8 +283,9 @@ mod tests {
             (0, b'D', "invalid Trojan user"),
             (56, b'!', "CRLF"),
             (57, b'!', "CRLF"),
+            (58, 0, "command 0"),
             (58, 2, "command 2"),
-            (58, 3, "command 3"),
+            (58, 4, "command 4"),
             (58, 255, "command 255"),
             (59, 2, "address family"),
             (66, b'!', "CRLF"),

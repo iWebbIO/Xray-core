@@ -1275,8 +1275,10 @@ mod imp {
     // carries the needed Send bound itself.
     #[allow(async_fn_in_trait)]
     pub trait WgUdpTransport: Send + Sync + 'static {
-        /// Queue one encrypted datagram to a WireGuard endpoint.
-        fn send_datagram(&self, endpoint: SocketAddr, datagram: &[u8]) -> io::Result<()>;
+        /// Queue one encrypted datagram to a WireGuard endpoint. Async like
+        /// Go's blocking `PacketConn.WriteTo`: a real socket waits for
+        /// writability instead of failing the whole engine on WouldBlock.
+        async fn send_datagram(&self, endpoint: SocketAddr, datagram: &[u8]) -> io::Result<()>;
 
         /// Wait for the next datagram and its source endpoint.
         async fn recv_datagram(&self) -> io::Result<(SocketAddr, Vec<u8>)>;
@@ -1323,7 +1325,7 @@ mod imp {
                     match actions {
                         Ok(actions) => {
                             for action in actions {
-                                self.deliver(action)?;
+                                self.deliver(action).await?;
                             }
                         }
                         Err(error) => {
@@ -1343,7 +1345,7 @@ mod imp {
                     match actions {
                         Ok(actions) => {
                             for action in actions {
-                                self.deliver(action)?;
+                                self.deliver(action).await?;
                             }
                         }
                         Err(error) => {
@@ -1365,7 +1367,7 @@ mod imp {
                         warn!(peer, %error, "WireGuard timer error");
                     }
                     for action in events.actions {
-                        self.deliver(action)?;
+                        self.deliver(action).await?;
                     }
                 }
             };
@@ -1377,11 +1379,11 @@ mod imp {
             }
         }
 
-        fn deliver(&self, action: PacketAction) -> io::Result<()> {
+        async fn deliver(&self, action: PacketAction) -> io::Result<()> {
             match action {
                 PacketAction::Network {
                     endpoint, packet, ..
-                } => self.transport.send_datagram(endpoint, &packet),
+                } => self.transport.send_datagram(endpoint, &packet).await,
                 PacketAction::Tunnel { packet, .. } => match self.netstack.write_ip(&packet) {
                     Ok(()) => Ok(()),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -1401,10 +1403,64 @@ mod imp {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    // ---------------------------------------------------------------------------
+    // Real-socket UDP transport (proxy/wireguard bind.go)
+    // ---------------------------------------------------------------------------
+
+    /// One bound UDP socket serving every peer endpoint, like Go's
+    /// `net.PacketConn` in proxy/wireguard/bind.go: datagrams are sent with
+    /// `send_to` to the engine-chosen endpoint, so authenticated endpoint
+    /// roaming (the engine's `set_peer_endpoint` on verified traffic) keeps
+    /// working without rebinding. Reserved-byte marking is the engine's job
+    /// (`mark_reserved` on send, clearing on receive), not the transport's.
+    pub struct WgUdpSocket {
+        socket: tokio::net::UdpSocket,
+    }
+
+    impl WgUdpSocket {
+        /// Bind the transport socket. `bind` is usually the unspecified
+        /// address with port 0 (the OS picks the port, like Go's
+        /// `internet.DialSystem` UDP bind); a concrete address is accepted for
+        /// callers that must control it. Must be called inside a tokio runtime
+        /// because the socket is registered with its reactor.
+        pub fn bind(bind: SocketAddr) -> io::Result<Self> {
+            let socket = std::net::UdpSocket::bind(bind)?;
+            socket.set_nonblocking(true)?;
+            Ok(Self {
+                socket: tokio::net::UdpSocket::from_std(socket)?,
+            })
+        }
+
+        /// The bound local address of the underlying socket.
+        pub fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.socket.local_addr()
+        }
+    }
+
+    impl WgUdpTransport for WgUdpSocket {
+        async fn send_datagram(&self, endpoint: SocketAddr, datagram: &[u8]) -> io::Result<()> {
+            // A UDP datagram is atomic: the count is either the whole buffer
+            // or the call fails, exactly like Go's `PacketConn.WriteTo`. The
+            // reactor-integrated send waits for writability when the socket
+            // is momentarily not ready, instead of surfacing WouldBlock.
+            self.socket.send_to(datagram, endpoint).await?;
+            Ok(())
+        }
+
+        async fn recv_datagram(&self) -> io::Result<(SocketAddr, Vec<u8>)> {
+            let mut buffer = vec![0u8; 65_535];
+            let (count, source) = self.socket.recv_from(&mut buffer).await?;
+            buffer.truncate(count);
+            Ok((source, buffer))
+        }
+    }
 }
 
 #[cfg(feature = "native-tun")]
-pub use imp::{NetTcpListener, NetTcpStream, Netstack, UdpDatagram, WgNet, WgUdpTransport};
+pub use imp::{
+    NetTcpListener, NetTcpStream, Netstack, UdpDatagram, WgNet, WgUdpSocket, WgUdpTransport,
+};
 
 // -----------------------------------------------------------------------------
 // Tests: two in-memory WgNet instances cross-wired over a loopback datagram
@@ -1487,7 +1543,7 @@ mod tests {
     }
 
     impl WgUdpTransport for LoopbackWire {
-        fn send_datagram(&self, endpoint: SocketAddr, datagram: &[u8]) -> io::Result<()> {
+        async fn send_datagram(&self, endpoint: SocketAddr, datagram: &[u8]) -> io::Result<()> {
             if endpoint != self.remote {
                 return Err(io::Error::other(format!(
                     "the loopback wire only reaches {}",

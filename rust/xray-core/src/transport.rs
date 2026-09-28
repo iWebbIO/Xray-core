@@ -159,8 +159,12 @@ impl InboundTransport {
     }
 }
 
+/// The outbound side of a streamSettings stack, assembled by config.rs and
+/// dialed by the runtime's `establish`. Public so the transport-level
+/// integration tests (tests/masque_transport.rs) can build one directly;
+/// nothing outside the crate is expected to construct it by hand.
 #[derive(Clone, Default)]
-pub(crate) struct OutboundTransport {
+pub struct OutboundTransport {
     pub tls: Option<tls::TlsClient>,
     pub reality: Option<reality::handshake::ClientConfig>,
     pub server_name: String,
@@ -189,11 +193,7 @@ impl OutboundTransport {
         resolved: Option<&[std::net::SocketAddr]>,
     ) -> anyhow::Result<(BoxStream, std::net::SocketAddr)> {
         if let Some(settings) = &self.masque {
-            // The MASQUE transport dial (one TLS+h2 connection, then an
-            // extended CONNECT per target) is implemented by the wiring
-            // batch agent in this file; fail explicitly until it lands.
-            let _ = (settings, &self.masque_tls, resolved);
-            anyhow::bail!("MASQUE transport connect is not wired yet");
+            return self.connect_masque(settings, destination, resolved).await;
         }
         if let Some(config) = &self.kcp {
             anyhow::ensure!(
@@ -292,6 +292,69 @@ impl OutboundTransport {
         }
         Ok((stream, bound))
     }
+
+    /// The MASQUE arm of [Self::connect_resolved].
+    ///
+    /// Go reference (transport/internet/masque/dialer.go): the masque dialer
+    /// is registered via `internet.RegisterTransportDialer(protocolName,
+    /// Dial)` and receives the *outbound's* destination — the proxy-server
+    /// address the runtime is dialing, never the inner protocol's final
+    /// target. `dialHTTP2` forces `dest.Network = TCP`, dials TCP+TLS+h2 to
+    /// that destination, and establishes the CONNECT-IP tunnel with the
+    /// server reached there using `authority(config, serverName, dest.Port)`.
+    /// The proxied protocol then runs inside the tunnel and addresses its
+    /// real target at the protocol level (proxy/masque/client.go wraps the
+    /// returned tunnel in a wireguard TUN netstack and dials the final target
+    /// through it: `t.tnet.Dial("tcp", ob.Target.NetAddr())`). The
+    /// composition for a generic proxy over the masque transport is therefore
+    /// that the tunneled target IS the destination — the proxy server itself
+    /// — and the masque server connects to exactly that address; the inner
+    /// protocol carries its real destination inside. This port's per-target
+    /// stream model (transport/masque.rs) encodes that destination in the
+    /// extended-CONNECT path, so the runtime needs no TUN netstack here.
+    async fn connect_masque(
+        &self,
+        settings: &masque::Settings,
+        destination: &crate::address::Destination,
+        resolved: Option<&[std::net::SocketAddr]>,
+    ) -> anyhow::Result<(BoxStream, std::net::SocketAddr)> {
+        // config.rs pairs network "masque" with security "tls" (h2-only
+        // ALPN); a hand-built transport without the TLS settings fails here
+        // instead of dialing plaintext.
+        let tls = self.masque_tls.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("the masque transport requires \"security\": \"tls\"")
+        })?;
+        // The HTTP authority / TLS SNI fallback, derived like the xhttp
+        // arm's authority and Go's authority(): the configured TLS server
+        // name wins, else the destination host. masque::Settings::authority
+        // appends the dialed port itself, so only the host is passed on.
+        let host = if self.server_name.is_empty() {
+            destination.address.to_string()
+        } else {
+            self.server_name.clone()
+        };
+        let addresses = masque_dial_addresses(destination, resolved).await?;
+        let client = dial_masque_client(&addresses, &host, settings, tls).await?;
+        // The tunnel target is the destination itself: the proxy server
+        // being dialed through the tunnel (see the method doc above).
+        let stream = client
+            .connect_stream(&masque::Target::tcp(
+                destination.address.to_string(),
+                destination.port,
+            ))
+            .await?;
+        // The stream must keep the tunnel alive after this frame returns:
+        // only the MasqueClient owns the h2 connection driver, so it rides
+        // along inside MasqueTunnel. The placeholder matches the xhttp arm:
+        // the real socket lives inside the client, not on this stream.
+        Ok((
+            Box::new(MasqueTunnel {
+                stream,
+                _client: client,
+            }),
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        ))
+    }
 }
 
 async fn open_tcp_tls(
@@ -341,6 +404,100 @@ async fn open_tcp_tls(
         };
     }
     Ok((stream, bound))
+}
+
+/// The MASQUE dial candidates, mirroring how [open_tcp_tls] resolves the
+/// destination: the `resolved` override wins, an IP destination dials its
+/// literal, and a domain destination resolves through `lookup_host` — the
+/// same resolver `TcpStream::connect((host, port))` uses in the TCP arm.
+async fn masque_dial_addresses(
+    destination: &crate::address::Destination,
+    resolved: Option<&[std::net::SocketAddr]>,
+) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    use crate::address::Address;
+    let addresses = if let Some(addresses) = resolved {
+        addresses.to_vec()
+    } else {
+        match &destination.address {
+            Address::Ip(ip) => vec![std::net::SocketAddr::new(*ip, destination.port)],
+            Address::Domain(host) => tokio::net::lookup_host((host.as_str(), destination.port))
+                .await?
+                .collect(),
+        }
+    };
+    anyhow::ensure!(
+        !addresses.is_empty(),
+        "no address resolved for the MASQUE transport dial"
+    );
+    Ok(addresses)
+}
+
+/// Dials the MASQUE server across the candidates in order, like
+/// `TcpStream::connect(&addresses)` in the TCP arm: the first TLS+h2
+/// handshake that succeeds wins, and the last failure surfaces when none do.
+async fn dial_masque_client(
+    addresses: &[std::net::SocketAddr],
+    host: &str,
+    settings: &masque::Settings,
+    tls: &tls::TlsSettings,
+) -> anyhow::Result<masque::MasqueClient> {
+    let mut last = None;
+    for address in addresses {
+        match masque::MasqueClient::dial(*address, host, settings, tls).await {
+            Ok(client) => return Ok(client),
+            Err(error) => last = Some(error),
+        }
+    }
+    let error = last.unwrap_or_else(|| io::Error::other("no MASQUE dial address"));
+    Err(anyhow::Error::new(error).context("MASQUE transport dial failed"))
+}
+
+/// One MASQUE extended-CONNECT tunnel bound to the client that owns its
+/// HTTP/2 connection.
+///
+/// Unlike the gRPC transport — where the `Tunnel` returned by
+/// `grpc::Client::open` retains the connection driver itself, letting the
+/// short-lived `Client` handle drop after `connect_resolved` —
+/// `masque::H2Stream` does not hold the driver: only
+/// [masque::MasqueClient] keeps it, and its `Driver` aborts the h2
+/// connection task when the last client drops (the component's own tests
+/// hold the client beside the stream for exactly this reason). The stream
+/// this arm returns must outlive `connect_resolved`'s stack frame, so the
+/// wrapper carries the client alongside the stream. Dropping it resets the
+/// CONNECT stream first (field declaration order: `stream` before
+/// `_client`), then drops the client and aborts the driver task, tearing
+/// the tunnel down without a panic or leak.
+struct MasqueTunnel {
+    stream: BoxStream,
+    /// Dropped after `stream` so the h2 stream is reset before the
+    /// connection driver aborts.
+    _client: masque::MasqueClient,
+}
+
+impl AsyncRead for MasqueTunnel {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for MasqueTunnel {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, bytes)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 pub struct Joined<R, W> {

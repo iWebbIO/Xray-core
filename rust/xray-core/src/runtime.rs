@@ -48,19 +48,27 @@ struct Dispatcher {
     udp: Option<Arc<dyn udp::UdpDispatcher>>,
     policy: crate::features::PolicyManager,
     stats: Option<Arc<crate::features::StatsManager>>,
+    /// Routing outbound tags in the Router's outbound order: the configured
+    /// outbounds, then the API tag, then the reverse portal tags. Indexes
+    /// beyond `outbounds`/`transports` select a portal (dispatched through
+    /// `reverse`, like Go's portal outbound handlers in the manager).
     outbound_tags: Vec<String>,
     logger: crate::logging::Logger,
     api: Option<crate::api::ApiStreamSender>,
-    /// The configured DNS app, used by freedom's non-AsIs strategies, the UDP
-    /// dispatcher resolver and (once wired) routed lookups.
-    #[allow(dead_code)] // read by the DNS wiring batch agent
+    /// The configured DNS app, used by freedom's non-AsIs strategies and the
+    /// UDP dispatcher resolver.
     dns: Option<Arc<crate::dns::app::DnsApp>>,
     /// Reverse app handle; installed once after construction because the
     /// bridges dial carriers through this very dispatcher.
     reverse: std::sync::OnceLock<Arc<reverse_runtime::ReverseRuntime>>,
     /// Lazily-built WireGuard engines, one per outbound settings value.
-    #[allow(dead_code)] // read by the WireGuard wiring batch agent
     wireguard: wireguard_runtime::WireguardPool,
+    /// Lazily-dialed MASQUE h2 clients, one per outbound index (Go shares
+    /// one CONNECT-IP tunnel across every connection of the outbound); a
+    /// broken tunnel is dropped so the next connection re-dials.
+    masque: tokio::sync::Mutex<
+        std::collections::HashMap<usize, std::sync::Arc<crate::transport::masque::MasqueClient>>,
+    >,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -107,6 +115,22 @@ impl Server {
         }
         let mut outbound_tags: Vec<_> =
             config.outbounds.iter().map(|raw| raw.tag.clone()).collect();
+        // Reverse portal tags are routing outbounds exactly like Go's portal
+        // handlers in the outbound manager (app/reverse/portal.go Start).
+        // The frozen config compiler builds its router from the configured
+        // outbounds only, so the router is recompiled here with the portal
+        // entries appended in the same order they extend `outbound_tags`.
+        let portal_tags: Vec<String> = compiled
+            .reverse
+            .as_ref()
+            .map(|reverse| {
+                reverse
+                    .portals
+                    .iter()
+                    .map(|portal| portal.tag.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let router = Arc::new(compiled.router);
         let needs_udp = compiled
             .inbounds
@@ -149,6 +173,16 @@ impl Server {
             let (sender, incoming) = crate::api::incoming_channel(32)?;
             api_sender = Some(sender);
             api_channel = Some(incoming);
+        }
+        // Portal tags ride behind the API tag in both the router's outbound
+        // list and `outbound_tags` (the reverse portal dispatch reads them by
+        // index); a tag already used by an outbound or the API is a conflict.
+        for tag in &portal_tags {
+            anyhow::ensure!(
+                !outbound_tags.iter().any(|existing| existing == tag),
+                "reverse portal tag {tag:?} conflicts with another outbound tag"
+            );
+            outbound_tags.push(tag.clone());
         }
         let mut listeners: Vec<(InboundListener, Inbound, String, InboundTransport)> = Vec::new();
         // Startup inbound snapshots for the HandlerService registry, plus the
@@ -219,6 +253,7 @@ impl Server {
             dns: compiled.dns.clone(),
             reverse: Default::default(),
             wireguard: wireguard_runtime::WireguardPool::new(),
+            masque: Default::default(),
         });
         let observatory = compiled
             .observatory
@@ -245,6 +280,7 @@ impl Server {
         for (raw, inbound, transport) in seeds {
             registry.seed_inbound(raw, inbound, transport);
         }
+        registry.seed_outbounds(config.outbounds.clone());
         let api_server = config.api.as_ref().map(|api| {
             let mut routes = tonic::service::Routes::default();
             for service in &api.services {
@@ -538,8 +574,8 @@ async fn handle_stream(
         _ = cancel.cancelled() => return Ok(()),
         result = timeout(policy.timeouts.handshake, proxy_handshake(stream, inbound)) => result.context("proxy handshake timed out")??,
     };
-    let request = match handshake {
-        InboundHandshake::Connect(request) => request,
+    let (request, vision) = match handshake {
+        InboundHandshake::Connect(request, vision) => (request, vision),
         InboundHandshake::SocksAssociate(request) => {
             let Inbound::Socks(settings) = inbound else {
                 unreachable!("only SOCKS can associate UDP")
@@ -580,7 +616,10 @@ async fn handle_stream(
             user: &request.user,
             network: "tcp",
         });
-        let outbound = &dispatcher.outbounds[selected];
+        // Portal indexes sit beyond the real outbounds (the routing-only
+        // reverse entries); they dispatch through the reverse app.
+        let portal_selected = selected >= dispatcher.outbounds.len();
+        let outbound = dispatcher.outbounds.get(selected);
         let record = |accepted: bool, reason: String| {
             let mut record = if accepted {
                 crate::logging::AccessRecord::accepted(source, &request.destination)
@@ -608,11 +647,27 @@ async fn handle_stream(
             Blackhole(&'a [u8]),
         }
         let idle_deadline = idle_since + policy.timeouts.connection_idle;
+        // A bridge-domain destination is a reverse carrier the bridge dialed:
+        // the portal takes the whole connection before routing (Go's isDomain
+        // check in app/reverse/portal.go HandleConnection).
+        if let Some(reverse) = dispatcher.reverse.get()
+            && reverse.is_portal_destination(&request.destination)
+        {
+            return tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Ok(()),
+                result = timeout_at(idle_deadline, async {
+                    request.reply.success(&mut stream, bound).await?;
+                    record(true, String::new());
+                    reverse.attach_carrier(stream).await
+                }) => result.context("reverse carrier timed out")?,
+            };
+        }
         // The authenticated session owns its policy and online guard during DNS,
         // dialing, outbound authentication, proxy replies and API queue backpressure.
         let dispatch = timeout_at(idle_deadline, async {
             let mut resolved = None;
-            if matches!(outbound, Outbound::Freedom { .. }) {
+            if matches!(outbound, Some(Outbound::Freedom { .. })) {
                 let name = match inbound {
                     Inbound::Socks(_) => "socks",
                     Inbound::Http(_) => "http",
@@ -625,7 +680,14 @@ async fn handle_stream(
                 };
                 let admission = timeout(
                     DIAL_TIMEOUT,
-                    admission::admit(outbound, name, &request.destination),
+                    admission::admit(
+                        // The Freedom match above proved this is a real
+                        // outbound; unwrap cannot fail.
+                        outbound.expect("freedom admission requires a real outbound"),
+                        name,
+                        &request.destination,
+                        dispatcher.dns.as_ref(),
+                    ),
                 )
                 .await
                 .context("freedom admission timed out")??;
@@ -639,7 +701,7 @@ async fn handle_stream(
                 }
             }
             let dispatch = match outbound {
-                Outbound::Api => {
+                Some(Outbound::Api) => {
                     // Keep the client and user guard in this connection task. The
                     // API receives only the other end of the bounded relay, as Go's
                     // commander receives a connection backed by dispatcher pipes.
@@ -653,9 +715,58 @@ async fn handle_stream(
                     request.reply.success(&mut stream, bound).await?;
                     Dispatch::Relay(Box::new(upstream))
                 }
-                Outbound::Blackhole { response } => {
+                Some(Outbound::Blackhole { response }) => {
                     request.reply.success(&mut stream, bound).await?;
                     Dispatch::Blackhole(response)
+                }
+                Some(Outbound::Masque { .. }) => {
+                    // The MASQUE proxy owns the relay: one shared h2 client
+                    // per outbound (Go reuses one CONNECT-IP tunnel), one
+                    // extended-CONNECT stream per target connection.
+                    let upstream = timeout(
+                        DIAL_TIMEOUT,
+                        dispatcher.masque_stream(selected, &request.destination),
+                    )
+                    .await
+                    .context("MASQUE outbound connection timed out")
+                    .and_then(|r| r);
+                    let (upstream, bound) = match upstream {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            record(false, error.to_string());
+                            request.reply.failure(&mut stream, 5).await?;
+                            return Err(error);
+                        }
+                    };
+                    request.reply.success(&mut stream, bound).await?;
+                    Dispatch::Relay(upstream)
+                }
+                None if portal_selected => {
+                    // A portal-tag routing outbound (Go's reverse `Outbound`
+                    // handler): the session opens through the portal's least
+                    // loaded carrier and relays like any proxy hop.
+                    let reverse = dispatcher
+                        .reverse
+                        .get()
+                        .context("reverse portal selected without a reverse app")?;
+                    let tag = dispatcher.outbound_tags[selected].clone();
+                    let upstream = match timeout(
+                        DIAL_TIMEOUT,
+                        reverse.open_session(&tag, &request.destination),
+                    )
+                    .await
+                    .context("reverse portal connection timed out")
+                    .and_then(|result| result.map_err(anyhow::Error::from))
+                    {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            record(false, error.to_string());
+                            request.reply.failure(&mut stream, 5).await?;
+                            return Err(error);
+                        }
+                    };
+                    request.reply.success(&mut stream, bound).await?;
+                    Dispatch::Relay(upstream)
                 }
                 _ => {
                     let counters = dispatcher
@@ -671,8 +782,12 @@ async fn handle_stream(
                     let upstream = timeout(
                         DIAL_TIMEOUT,
                         establish(
-                            outbound,
-                            &dispatcher.transports[selected],
+                            dispatcher,
+                            outbound.context("selected outbound unavailable")?,
+                            dispatcher
+                                .transports
+                                .get(selected)
+                                .context("selected outbound transport unavailable")?,
                             &request.destination,
                             resolved.as_deref(),
                             counters,
@@ -698,6 +813,11 @@ async fn handle_stream(
         })
         .await
         .context("proxy session inactivity timeout during setup")??;
+        // A Vision request wraps the inbound body after the reply header is
+        // on the wire (Go wraps between the response header and the relay).
+        if let Some(uuid) = vision {
+            stream = Box::new(protocol::vless_vision::VisionStream::server(stream, uuid));
+        }
         // Bytes read ahead by HTTP must pass through the same timed and accounted
         // transfer as all subsequent payload; their wire bytes were already counted.
         if !request.initial_payload.is_empty() {
@@ -766,8 +886,10 @@ async fn handle_stream(
 
 /// The three inbound session shapes the connection dispatcher understands.
 enum InboundHandshake {
-    /// One proxied TCP request.
-    Connect(protocol::Request),
+    /// One proxied TCP request; the second field is the matched VLESS
+    /// account's UUID when the request rode the Vision flow (the body wrap
+    /// seed, `proxy.NewTrafficState`).
+    Connect(protocol::Request, Option<[u8; 16]>),
     /// A SOCKS UDP ASSOCIATE with its control-stream protocol.
     SocksAssociate(protocol::socks::AssociateRequest),
     /// A Trojan UDP association: frames over the request's own connection.
@@ -782,20 +904,22 @@ async fn proxy_handshake(
     let request = match inbound {
         Inbound::Vmess(authenticator) => {
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
-            return Ok((stream, InboundHandshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request, None)));
         }
         Inbound::Shadowsocks(account) => {
             let (stream, request) = protocol::shadowsocks_session::accept(stream, account).await?;
-            return Ok((stream, InboundHandshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request, None)));
         }
         Inbound::Shadowsocks2022 { account, .. } => {
             let (stream, request) = protocol::shadowsocks2022::accept(stream, account).await?;
-            return Ok((stream, InboundHandshake::Connect(request)));
+            return Ok((stream, InboundHandshake::Connect(request, None)));
         }
         Inbound::Socks(settings) => {
             let handshake = protocol::socks::handshake_with_udp(&mut stream, settings).await?;
             return match handshake {
-                Handshake::Connect(request) => Ok((stream, InboundHandshake::Connect(request))),
+                Handshake::Connect(request) => {
+                    Ok((stream, InboundHandshake::Connect(request, None)))
+                }
                 Handshake::Associate(request) => {
                     Ok((stream, InboundHandshake::SocksAssociate(request)))
                 }
@@ -818,17 +942,17 @@ async fn proxy_handshake(
                 None => stream,
             };
             let accepted = protocol::vless::read_request(&mut stream, accounts).await?;
-            // The Vision body wrap lands with the runtime wiring batch; the
-            // request's flow addon is validated against the account by the
-            // reader.
-            return Ok((stream, InboundHandshake::Connect(accepted.request)));
+            // The reader validated the flow against the account; a Vision
+            // request carries the account UUID for the body wrap.
+            let vision = (accepted.flow == protocol::vless::XRV_FLOW).then_some(accepted.id);
+            return Ok((stream, InboundHandshake::Connect(accepted.request, vision)));
         }
         Inbound::Trojan { accounts, .. } => {
             let accepted = protocol::trojan::read_request(&mut stream, accounts).await?;
             if accepted.udp {
                 return Ok((stream, InboundHandshake::TrojanUdp(accepted.request)));
             }
-            return Ok((stream, InboundHandshake::Connect(accepted.request)));
+            return Ok((stream, InboundHandshake::Connect(accepted.request, None)));
         }
         Inbound::Dokodemo(destination) => Request {
             destination: destination.clone(),
@@ -837,7 +961,7 @@ async fn proxy_handshake(
             reply: Reply::None,
         },
     };
-    Ok((stream, InboundHandshake::Connect(request)))
+    Ok((stream, InboundHandshake::Connect(request, None)))
 }
 
 fn source_ip_string(source: SocketAddr) -> String {
@@ -846,6 +970,87 @@ fn source_ip_string(source: SocketAddr) -> String {
         format!("[{}]", source.ip())
     } else {
         source.ip().to_string()
+    }
+}
+
+impl Dispatcher {
+    /// Open one proxied TCP stream toward `target` through the outbound's
+    /// cached MASQUE h2 client, re-dialing the shared tunnel once when the
+    /// cached connection has broken.
+    async fn masque_stream(
+        &self,
+        index: usize,
+        target: &Destination,
+    ) -> Result<(crate::transport::BoxStream, SocketAddr)> {
+        let Outbound::Masque { server, .. } = &self.outbounds[index] else {
+            anyhow::bail!("MASQUE dispatch selected a non-masque outbound");
+        };
+        let transport = &self.transports[index];
+        let (settings, tls) = match (&transport.masque, &transport.masque_tls) {
+            (Some(settings), Some(tls)) => (settings.clone(), tls.clone()),
+            _ => anyhow::bail!("MASQUE outbound requires the masque transport with TLS"),
+        };
+        let host = if transport.server_name.is_empty() {
+            server.address.to_string()
+        } else {
+            transport.server_name.clone()
+        };
+        let addresses: Vec<SocketAddr> = match &server.address {
+            crate::address::Address::Ip(ip) => vec![SocketAddr::new(*ip, server.port)],
+            crate::address::Address::Domain(name) => {
+                let ips: Vec<std::net::IpAddr> = match &self.dns {
+                    Some(app) => {
+                        app.lookup_ip(name, crate::dns::QueryOptions::default())
+                            .await?
+                            .ips
+                    }
+                    None => tokio::net::lookup_host((name.as_str(), server.port))
+                        .await?
+                        .map(|address| address.ip())
+                        .collect(),
+                };
+                ips.into_iter()
+                    .map(|ip| SocketAddr::new(ip, server.port))
+                    .collect()
+            }
+        };
+        let open = |client: std::sync::Arc<crate::transport::masque::MasqueClient>| {
+            let host = target.address.to_string();
+            async move {
+                client
+                    .connect_stream(&crate::transport::masque::Target::tcp(host, target.port))
+                    .await
+            }
+        };
+        let mut cache = self.masque.lock().await;
+        if let Some(client) = cache.get(&index) {
+            if let Ok(stream) = open(client.clone()).await {
+                return Ok((stream, SocketAddr::from(([0, 0, 0, 0], 0))));
+            }
+            // The shared tunnel broke; drop it and dial a fresh one below.
+            cache.remove(&index);
+        }
+        let mut last = None;
+        for address in addresses {
+            let client =
+                crate::transport::masque::MasqueClient::dial(address, &host, &settings, &tls).await;
+            match client {
+                Ok(client) => {
+                    let client = std::sync::Arc::new(client);
+                    match open(client.clone()).await {
+                        Ok(stream) => {
+                            cache.insert(index, client);
+                            return Ok((stream, SocketAddr::from(([0, 0, 0, 0], 0))));
+                        }
+                        Err(error) => last = Some(error.into()),
+                    }
+                }
+                Err(error) => last = Some(error.into()),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            anyhow::anyhow!("MASQUE server {server} resolved to no dialable address")
+        }))
     }
 }
 
@@ -858,6 +1063,7 @@ fn relay_buffer_size(policy: crate::features::policy::BufferPolicy) -> usize {
 }
 
 async fn establish(
+    dispatcher: &Dispatcher,
     outbound: &Outbound,
     transport: &OutboundTransport,
     target: &Destination,
@@ -865,16 +1071,10 @@ async fn establish(
     counters: TrafficCounters,
 ) -> Result<(crate::transport::BoxStream, SocketAddr)> {
     let remote = match outbound {
-        Outbound::Freedom {
-            redirect, strategy, ..
-        } => {
-            // Non-AsIs strategies resolve through the configured DNS app (or
-            // the system resolver when no `dns` app exists); the resolution
-            // itself lands with the DNS runtime wiring and fails explicitly
-            // until then.
-            if *strategy != crate::protocol::freedom::DomainStrategy::AsIs {
-                anyhow::bail!("freedom domain strategy resolution is not wired yet");
-            }
+        Outbound::Freedom { redirect, .. } => {
+            // Non-AsIs strategies were resolved by admission (the configured
+            // DNS app, falling back to the system resolver like Go); the
+            // resolved addresses dial through `connect_resolved` below.
             redirect.as_ref().unwrap_or(target)
         }
         Outbound::Socks { server, .. }
@@ -888,8 +1088,13 @@ async fn establish(
         Outbound::Blackhole { .. } | Outbound::Api => {
             anyhow::bail!("internal outbound cannot establish a remote stream")
         }
-        Outbound::Wireguard { .. } => {
-            anyhow::bail!("WireGuard outbound dispatch is not wired yet")
+        Outbound::Wireguard { settings } => {
+            // One lazily-built engine per settings value, dialed through the
+            // netstack's TCP path; the pool owns the Noise pumps.
+            return dispatcher
+                .wireguard
+                .connect(dispatcher, settings, target)
+                .await;
         }
     };
     let (mut stream, bound) = if let Some(addresses) = resolved {
@@ -951,7 +1156,20 @@ async fn establish(
                 None => stream,
             };
             protocol::vless::write_request(&mut stream, account, target).await?;
-            return Ok((Box::new(protocol::vless::VlessStream::new(stream)), bound));
+            let stream = Box::new(protocol::vless::VlessStream::new(stream));
+            // Vision accounts wrap the body after the request header (the
+            // writer already stripped the client-only `-udp443` spelling);
+            // with no early payload available at this point, the empty
+            // long-padding camouflage frame goes on the wire first, exactly
+            // like Go's "Insert padding with empty content".
+            if protocol::vless_vision::is_vision_flow(&account.flow) {
+                let mut vision = protocol::vless_vision::VisionStream::client(stream, account.id);
+                vision
+                    .queue_header_camo()
+                    .context("VLESS Vision header camouflage")?;
+                return Ok((Box::new(vision), bound));
+            }
+            return Ok((stream, bound));
         }
         Outbound::Trojan { account, .. } => {
             protocol::trojan::write_request(&mut stream, account, target).await?
