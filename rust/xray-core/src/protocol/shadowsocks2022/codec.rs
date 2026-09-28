@@ -7,6 +7,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
 };
 use anyhow::{Context, Result, ensure};
+use chacha20poly1305::ChaCha20Poly1305;
 use subtle::ConstantTimeEq;
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
@@ -29,34 +30,56 @@ pub(super) fn subkey(account: &Account, salt: &[u8]) -> Result<Zeroizing<Vec<u8>
     Ok(Zeroizing::new(derived[..account.kind.key_len()].to_vec()))
 }
 
-enum Aes {
+enum AeadKind {
     A128(Box<Aes128Gcm>),
     A256(Box<Aes256Gcm>),
+    /// IETF ChaCha20-Poly1305: sing's TCP constructor for the chacha
+    /// method (12-byte nonce, zero-start, incremented per chunk); only the
+    /// UDP layout uses XChaCha (`chacha20poly1305.NewX`).
+    ChaCha(Box<ChaCha20Poly1305>),
 }
 pub(super) struct Cipher {
-    aes: Aes,
-    nonce: [u8; 12],
+    aead: AeadKind,
+    nonce: [u8; 24],
+    nonce_len: usize,
     exhausted: bool,
 }
 impl Cipher {
     pub(super) fn new(account: &Account, salt: &[u8]) -> Result<Self> {
         let key = subkey(account, salt)?;
-        let aes = match account.kind {
-            CipherKind::Aes128Gcm => Aes::A128(Box::new(
-                Aes128Gcm::new_from_slice(&key).expect("fixed key"),
-            )),
-            CipherKind::Aes256Gcm => Aes::A256(Box::new(
-                Aes256Gcm::new_from_slice(&key).expect("fixed key"),
-            )),
+        let (aead, nonce_len) = match account.kind {
+            CipherKind::Aes128Gcm => (
+                AeadKind::A128(Box::new(
+                    Aes128Gcm::new_from_slice(&key).expect("fixed key"),
+                )),
+                12,
+            ),
+            CipherKind::Aes256Gcm => (
+                AeadKind::A256(Box::new(
+                    Aes256Gcm::new_from_slice(&key).expect("fixed key"),
+                )),
+                12,
+            ),
+            CipherKind::ChaCha20Poly1305 => (
+                AeadKind::ChaCha(Box::new(
+                    ChaCha20Poly1305::new_from_slice(&key).expect("fixed key"),
+                )),
+                12,
+            ),
         };
         Ok(Self {
-            aes,
-            nonce: [0; 12],
+            aead,
+            nonce: [0; 24],
+            nonce_len,
             exhausted: false,
         })
     }
+    fn nonce(&self) -> [u8; 24] {
+        self.nonce
+    }
     fn advance(&mut self) {
-        for byte in &mut self.nonce {
+        // sing increments only the method's nonce bytes; AES caps at 12.
+        for byte in &mut self.nonce[..self.nonce_len] {
             *byte = byte.wrapping_add(1);
             if *byte != 0 {
                 return;
@@ -66,9 +89,13 @@ impl Cipher {
     }
     pub(super) fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         ensure!(!self.exhausted, "Shadowsocks2022 nonce exhausted");
-        let output = match &self.aes {
-            Aes::A128(aes) => aes.encrypt((&self.nonce).into(), plaintext),
-            Aes::A256(aes) => aes.encrypt((&self.nonce).into(), plaintext),
+        let nonce = self.nonce();
+        let output = match &self.aead {
+            AeadKind::A128(aes) => aes.encrypt((&nonce[..self.nonce_len]).into(), plaintext),
+            AeadKind::A256(aes) => aes.encrypt((&nonce[..self.nonce_len]).into(), plaintext),
+            AeadKind::ChaCha(cipher) => {
+                cipher.encrypt((&nonce[..self.nonce_len]).into(), plaintext)
+            }
         }
         .map_err(|_| anyhow::anyhow!("Shadowsocks2022 encryption failed"))?;
         self.advance();
@@ -76,9 +103,13 @@ impl Cipher {
     }
     pub(super) fn open(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         ensure!(!self.exhausted, "Shadowsocks2022 nonce exhausted");
-        let output = match &self.aes {
-            Aes::A128(aes) => aes.decrypt((&self.nonce).into(), ciphertext),
-            Aes::A256(aes) => aes.decrypt((&self.nonce).into(), ciphertext),
+        let nonce = self.nonce();
+        let output = match &self.aead {
+            AeadKind::A128(aes) => aes.decrypt((&nonce[..self.nonce_len]).into(), ciphertext),
+            AeadKind::A256(aes) => aes.decrypt((&nonce[..self.nonce_len]).into(), ciphertext),
+            AeadKind::ChaCha(cipher) => {
+                cipher.decrypt((&nonce[..self.nonce_len]).into(), ciphertext)
+            }
         }
         .map_err(|_| anyhow::anyhow!("Shadowsocks2022 authentication failed"))?;
         self.advance();

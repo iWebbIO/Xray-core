@@ -115,7 +115,11 @@ async fn independent_aes128_aes256_handshake_and_record_vectors() {
 
 #[test]
 fn account_modes_key_normalization_and_timestamp_edges() {
-    for kind in [CipherKind::Aes128Gcm, CipherKind::Aes256Gcm] {
+    for kind in [
+        CipherKind::Aes128Gcm,
+        CipherKind::Aes256Gcm,
+        CipherKind::ChaCha20Poly1305,
+    ] {
         let key = vec![0xa5; kind.key_len()];
         let password = STANDARD.encode(&key);
         assert_eq!(
@@ -144,10 +148,13 @@ fn account_modes_key_normalization_and_timestamp_edges() {
         assert!(!debug.contains("90, 90"));
         assert_eq!(kind.name().parse::<CipherKind>().unwrap(), kind);
     }
-    assert!(
+    // The single-key XChaCha method parses like every other method; its
+    // cipher arms are exercised by the codec round trips below.
+    assert_eq!(
         "2022-blake3-chacha20-poly1305"
             .parse::<CipherKind>()
-            .is_err()
+            .unwrap(),
+        CipherKind::ChaCha20Poly1305
     );
     let now = 1_700_000_000;
     for epoch in [now - 30, now, now + 30] {
@@ -191,7 +198,11 @@ async fn raw_accept(wire: &[u8], account: &Account) -> Result<(BoxStream, Reques
 
 #[tokio::test]
 async fn request_authentication_replay_and_initial_payload_boundaries() {
-    for kind in [CipherKind::Aes128Gcm, CipherKind::Aes256Gcm] {
+    for kind in [
+        CipherKind::Aes128Gcm,
+        CipherKind::Aes256Gcm,
+        CipherKind::ChaCha20Poly1305,
+    ] {
         let account = account(kind);
         let salt = salt(kind);
         let now = unix_time().unwrap();
@@ -421,7 +432,11 @@ async fn every_partial_response_and_ordinary_record_is_truncation_not_eof() {
 #[tokio::test]
 async fn complete_tcp_sessions_support_maximum_records_and_half_close() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        for kind in [CipherKind::Aes128Gcm, CipherKind::Aes256Gcm] {
+        for kind in [
+            CipherKind::Aes128Gcm,
+            CipherKind::Aes256Gcm,
+            CipherKind::ChaCha20Poly1305,
+        ] {
             // Enough space for the complete first fixed header, preserving its
             // source single-read gate; the body exceeds the duplex buffer.
             let (client, server) = duplex(2048);
@@ -624,7 +639,11 @@ async fn pinned_go_tcp_interoperability_both_directions_and_ciphers() {
     let binary = std::env::var_os("XRAY_SS2022_GO_PEER")
         .expect("set XRAY_SS2022_GO_PEER to the built fixtures/go-peer executable");
     tokio::time::timeout(Duration::from_secs(60), async {
-        for kind in [CipherKind::Aes128Gcm, CipherKind::Aes256Gcm] {
+        for kind in [
+            CipherKind::Aes128Gcm,
+            CipherKind::Aes256Gcm,
+            CipherKind::ChaCha20Poly1305,
+        ] {
             let account = account(kind);
             let password = STANDARD.encode(account.key.as_slice());
             let mut peer = GoPeer(

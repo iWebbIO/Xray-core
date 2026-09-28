@@ -194,7 +194,7 @@ fn inbound_users(raw: &InboundConfig, inbound: &Inbound) -> Vec<User> {
                 }
             }
         }
-        Inbound::Shadowsocks(_) | Inbound::Shadowsocks2022 { .. } => {
+        Inbound::Shadowsocks { .. } | Inbound::Shadowsocks2022 { .. } => {
             // The single-account settings carry the email at the top level or
             // inside the one user entry; Go's shadowsocks manager lists that
             // account. The password itself stays out of the listing (Go's

@@ -42,18 +42,22 @@ const REPLAY_CAPACITY: usize = 65_536;
 pub enum CipherKind {
     Aes128Gcm,
     Aes256Gcm,
+    /// Single-key XChaCha20-Poly1305 (32-byte PSK and salt); the UDP layout
+    /// uses the PSK directly and TCP derives session subkeys.
+    ChaCha20Poly1305,
 }
 impl CipherKind {
     pub fn key_len(self) -> usize {
         match self {
             Self::Aes128Gcm => 16,
-            Self::Aes256Gcm => 32,
+            Self::Aes256Gcm | Self::ChaCha20Poly1305 => 32,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Aes128Gcm => "2022-blake3-aes-128-gcm",
             Self::Aes256Gcm => "2022-blake3-aes-256-gcm",
+            Self::ChaCha20Poly1305 => "2022-blake3-chacha20-poly1305",
         }
     }
 }
@@ -63,9 +67,8 @@ impl FromStr for CipherKind {
         match name {
             "2022-blake3-aes-128-gcm" => Ok(Self::Aes128Gcm),
             "2022-blake3-aes-256-gcm" => Ok(Self::Aes256Gcm),
-            _ => anyhow::bail!(
-                "unsupported Shadowsocks2022 cipher; only single-account AES128/AES256 TCP is implemented"
-            ),
+            "2022-blake3-chacha20-poly1305" => Ok(Self::ChaCha20Poly1305),
+            _ => anyhow::bail!("unsupported Shadowsocks2022 cipher"),
         }
     }
 }

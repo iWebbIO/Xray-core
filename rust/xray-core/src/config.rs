@@ -580,7 +580,11 @@ pub enum Inbound {
     Vmess(crate::protocol::vmess::stream::SharedAuthenticator),
     Socks(SocksSettings),
     Http(HttpSettings),
-    Dokodemo(Destination),
+    Dokodemo {
+        destination: Destination,
+        /// `network: "tcp,udp"` relays datagrams to the fixed destination.
+        udp: bool,
+    },
     Vless {
         accounts: Vec<crate::protocol::vless::Account>,
         /// Inbound `decryption`: `none` keeps the plaintext header exchange,
@@ -594,7 +598,11 @@ pub enum Inbound {
         /// Trojan connection) is always available.
         udp: bool,
     },
-    Shadowsocks(crate::protocol::shadowsocks_session::Account),
+    Shadowsocks {
+        account: crate::protocol::shadowsocks_session::Account,
+        /// `network: "tcp,udp"` opts into the legacy AEAD UDP relay.
+        udp: bool,
+    },
     Shadowsocks2022 {
         account: crate::protocol::shadowsocks2022::Account,
         /// `network: "tcp,udp"` opts into the 2022 UDP listener; the absent
@@ -1049,7 +1057,12 @@ pub(crate) fn compile_inbound(
                 .network
                 .or(settings.allowed_network)
                 .unwrap_or_else(|| "tcp".to_owned());
-            ensure!(network == "tcp", "dokodemo UDP is not migrated yet");
+            let udp = match network.as_str() {
+                "tcp" => false,
+                "tcp,udp" => true,
+                "udp" => bail!("udp-only dokodemo-door is not supported; use tcp,udp"),
+                other => bail!("unknown dokodemo network {other:?}"),
+            };
             let host = settings
                 .address
                 .or(settings.rewrite_address)
@@ -1059,7 +1072,10 @@ pub(crate) fn compile_inbound(
             } else {
                 settings.port
             };
-            Inbound::Dokodemo(Destination::new(&host, port)?)
+            Inbound::Dokodemo {
+                destination: Destination::new(&host, port)?,
+                udp,
+            }
         }
         "vless" | "trojan" | "shadowsocks" => proxies::inbound(&raw.protocol, &raw.settings)?,
         "vmess" => vmess::inbound(&raw.settings)?,

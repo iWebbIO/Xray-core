@@ -245,7 +245,7 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
                 // Go's nil NetworkList defaults to TCP only; `tcp,udp` opts in.
                 "" | "tcp" => false,
                 "tcp,udp" => true,
-                "udp" => bail!("udp-only Shadowsocks inbound is not migrated yet"),
+                "udp" => bail!("udp-only Shadowsocks inbound is not supported; use tcp,udp"),
                 other => bail!("unknown Shadowsocks network {other:?}"),
             };
             let user = if let Some(users) = settings.clients.or(settings.users) {
@@ -268,8 +268,10 @@ pub(super) fn inbound(protocol: &str, settings: &Value) -> Result<Inbound> {
                     udp,
                 })
             } else {
-                ensure!(!udp, "legacy Shadowsocks UDP is not migrated yet");
-                Ok(Inbound::Shadowsocks(user.compile()?))
+                Ok(Inbound::Shadowsocks {
+                    account: user.compile()?,
+                    udp,
+                })
             }
         }
         "vless" => {
@@ -525,7 +527,6 @@ mod tests {
                 Outbound::Shadowsocks2022 { .. }
             ));
             for (field, value) in [
-                ("method", json!("2022-blake3-chacha20-poly1305")),
                 ("password", json!("AA==")),
                 ("password", json!(format!("{password}:{password}"))),
                 ("network", json!("udp")),
@@ -642,6 +643,9 @@ mod tests {
         let mut legacy = json!({"method":"aes-128-gcm","password":"pw"});
         assert!(inbound("shadowsocks", &legacy).is_ok());
         legacy["network"] = json!("tcp,udp");
-        assert!(inbound("shadowsocks", &legacy).is_err());
+        assert!(matches!(
+            inbound("shadowsocks", &legacy).unwrap(),
+            Inbound::Shadowsocks { udp: true, .. }
+        ));
     }
 }

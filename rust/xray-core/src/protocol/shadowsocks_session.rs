@@ -38,6 +38,14 @@ impl fmt::Debug for Account {
     }
 }
 impl Account {
+    /// The derived AEAD key material and cipher kind (for the UDP codec).
+    pub fn aead_material(&self) -> (CipherKind, zeroize::Zeroizing<Vec<u8>>) {
+        (
+            self.kind,
+            zeroize::Zeroizing::new(self.key.as_slice().to_vec()),
+        )
+    }
+
     pub fn new(kind: CipherKind, password: &str, email: String) -> Result<Self> {
         ensure!(!password.is_empty(), "Shadowsocks password is required");
         Ok(Self {

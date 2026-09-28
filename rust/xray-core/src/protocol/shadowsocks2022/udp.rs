@@ -8,7 +8,7 @@
 //! randomness, socket I/O, and remote-destination forwarding.
 //!
 //! The parent [`Account`] supports single-key AES128/AES256 only. Extended
-//! identity headers, relay chains, and UDP-only XChaCha accounts are not added.
+//! identity headers and relay chains are not added.
 
 use super::{Account, CipherKind};
 use crate::{
@@ -42,6 +42,9 @@ pub fn cipher(account: &Account) -> io::Result<Cipher> {
     let method = match account.kind {
         CipherKind::Aes128Gcm => Method2022::Aes128Gcm,
         CipherKind::Aes256Gcm => Method2022::Aes256Gcm,
+        // The single-key XChaCha layout (Go's chacha20poly1305.NewX on the
+        // PSK; no encrypted header, no session subkeys).
+        CipherKind::ChaCha20Poly1305 => Method2022::ChaCha20Poly1305,
     };
     Cipher::new(method, account.key.as_slice())
 }

@@ -17,6 +17,7 @@ mod dns_runtime;
 mod handler_registry;
 mod mux_runtime;
 mod observatory;
+mod plain_udp;
 mod reverse_runtime;
 mod sniffing;
 mod ss2022_udp_runtime;
@@ -262,8 +263,47 @@ impl Server {
                 ));
             }
         }
+        // UDP listener specs: bound sockets whose serve loops spawn in the
+        // root task where the dispatcher and stopping token exist.
         let mut udp_listeners = Vec::new();
         for (raw, inbound, _) in &seeds {
+            if let Inbound::Shadowsocks { account, udp: true } = inbound {
+                for port in raw.port.ports() {
+                    let bound = plain_udp::LegacyShadowsocksUdp::bind(
+                        SocketAddr::new(raw.listen, *port),
+                        account,
+                    );
+                    let bound = match bound {
+                        Ok(bound) => bound,
+                        Err(error) => {
+                            for (listener, _, _, _, _) in listeners {
+                                if let Err(close_error) = listener.close().await {
+                                    tracing::warn!(%close_error, "inbound rollback close failed");
+                                }
+                            }
+                            return Err(error)
+                                .with_context(|| format!("cannot bind inbound {:?} UDP", raw.tag));
+                        }
+                    };
+                    udp_listeners.push(UdpEntry::LegacyShadowsocks {
+                        bound,
+                        tag: raw.tag.clone(),
+                    });
+                }
+            }
+            if let Inbound::Dokodemo { udp: true, .. } = inbound {
+                for port in raw.port.ports() {
+                    let address = SocketAddr::new(raw.listen, *port);
+                    let Inbound::Dokodemo { destination, .. } = inbound else {
+                        unreachable!("checked above");
+                    };
+                    udp_listeners.push(UdpEntry::Dokodemo {
+                        address,
+                        destination: destination.clone(),
+                        tag: raw.tag.clone(),
+                    });
+                }
+            }
             if let Inbound::Shadowsocks2022 { account, udp: true } = inbound {
                 for port in raw.port.ports() {
                     let bound = ss2022_udp_runtime::Ss2022UdpListener::bind(
@@ -285,7 +325,10 @@ impl Server {
                                 .with_context(|| format!("cannot bind inbound {:?} UDP", raw.tag));
                         }
                     };
-                    udp_listeners.push((bound, raw.tag.clone()));
+                    udp_listeners.push(UdpEntry::Shadowsocks2022 {
+                        bound,
+                        tag: raw.tag.clone(),
+                    });
                 }
             }
         }
@@ -401,12 +444,37 @@ impl Server {
                 let stop = stopping.clone();
                 tasks.spawn(async move { burst.run(&stop).await });
             }
-            for (listener, tag) in udp_listeners {
+            for entry in udp_listeners {
                 let dispatcher = dispatcher.clone();
                 let stop = stopping.clone();
                 tasks.spawn(async move {
-                    if let Err(error) = listener.run(dispatcher, stop).await {
-                        tracing::warn!(inbound = %tag, %error, "SS2022 UDP listener ended");
+                    let result = match entry {
+                        UdpEntry::Shadowsocks2022 { bound, tag } => {
+                            let _ = tag;
+                            bound.run(dispatcher, stop).await
+                        }
+                        UdpEntry::LegacyShadowsocks { bound, tag } => {
+                            let tag: Arc<str> = Arc::from(tag);
+                            bound.run(dispatcher, tag, stop).await
+                        }
+                        UdpEntry::Dokodemo {
+                            address,
+                            destination,
+                            tag,
+                        } => {
+                            let tag: Arc<str> = Arc::from(tag);
+                            plain_udp::serve_dokodemo_udp(
+                                address,
+                                destination,
+                                dispatcher,
+                                tag,
+                                stop,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "inbound UDP listener ended");
                     }
                     Ok::<(), anyhow::Error>(())
                 });
@@ -625,6 +693,23 @@ async fn handle_connection(
             result
         }
     }
+}
+
+/// One bound UDP listener beside an inbound's TCP listener.
+enum UdpEntry {
+    Shadowsocks2022 {
+        bound: ss2022_udp_runtime::Ss2022UdpListener,
+        tag: String,
+    },
+    LegacyShadowsocks {
+        bound: plain_udp::LegacyShadowsocksUdp,
+        tag: String,
+    },
+    Dokodemo {
+        address: SocketAddr,
+        destination: Destination,
+        tag: String,
+    },
 }
 
 /// One bound inbound: its listener, compiled protocol/transport, tag and
@@ -892,11 +977,11 @@ async fn dispatch_common(
                 let name = match inbound {
                     Inbound::Socks(_) => "socks",
                     Inbound::Http(_) => "http",
-                    Inbound::Dokodemo(_) => "dokodemo-door",
+                    Inbound::Dokodemo { .. } => "dokodemo-door",
                     Inbound::Vless { .. } => "vless",
                     Inbound::Vmess(_) => "vmess",
                     Inbound::Trojan { .. } => "trojan",
-                    Inbound::Shadowsocks(_) => "shadowsocks",
+                    Inbound::Shadowsocks { .. } => "shadowsocks",
                     Inbound::Shadowsocks2022 { .. } => "shadowsocks-2022",
                 };
                 let admission = timeout(
@@ -1153,7 +1238,7 @@ async fn proxy_handshake(
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
             return Ok((stream, InboundHandshake::Connect(request, None)));
         }
-        Inbound::Shadowsocks(account) => {
+        Inbound::Shadowsocks { account, .. } => {
             let (stream, request) = protocol::shadowsocks_session::accept(stream, account).await?;
             return Ok((stream, InboundHandshake::Connect(request, None)));
         }
@@ -1201,7 +1286,7 @@ async fn proxy_handshake(
             }
             return Ok((stream, InboundHandshake::Connect(accepted.request, None)));
         }
-        Inbound::Dokodemo(destination) => Request {
+        Inbound::Dokodemo { destination, .. } => Request {
             destination: destination.clone(),
             user: String::new(),
             initial_payload: Vec::new(),
