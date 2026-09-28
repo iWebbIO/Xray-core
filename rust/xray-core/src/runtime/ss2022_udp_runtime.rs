@@ -101,6 +101,8 @@ impl Ss2022UdpListener {
         let inbound_tag: Arc<str> = Arc::from("");
 
         let (reply_tx, mut reply_rx) = mpsc::channel::<Response>(limits.response_queue);
+        let mut xudp_pumps = tokio::task::JoinSet::new();
+        let mut xudp_leases: Vec<Arc<super::mux_runtime::XudpLease>> = Vec::new();
         let stop = CancellationToken::new();
         let mut peers: HashMap<PeerKey, Peer> = HashMap::new();
         let mut readers = JoinSet::new();
@@ -161,6 +163,7 @@ impl Ss2022UdpListener {
                     };
                     let payload = accepted.datagram.payload;
                     let token = accepted.session.clone();
+                    let context_destination = context.destination.clone();
                     let dispatcher = Arc::clone(&udp_dispatcher);
                     let duration = limits.operation_timeout;
                     let stop_token = stop.clone();
@@ -172,16 +175,63 @@ impl Ss2022UdpListener {
                                 result.unwrap_or_else(|_| Err(timed_out("Shadowsocks 2022 UDP dispatch timed out")))
                             }
                         };
-                        (action, payload, token)
+                        (action, payload, token, context_destination)
                     });
                 }
                 completed = pending.join_next(), if !pending.is_empty() => {
-                    let Some(Ok((action, payload, token))) = completed else { counters.dispatch_errors += 1; continue; };
+                    let Some(Ok((action, payload, token, context_destination))) = completed else { counters.dispatch_errors += 1; continue; };
                     let action = match action { Ok(action) => action, Err(_) => { counters.dispatch_errors += 1; continue; } };
                     let (mut target, route, outbound_counters) = match action {
                         udp::DispatchAction::Drop => { counters.policy_drops += 1; continue; }
                         udp::DispatchAction::Direct(target) => (target, None, TrafficCounters::default()),
                         udp::DispatchAction::TrackedDirect { target, route, counters } => (target, Some(route), counters),
+                        udp::DispatchAction::Xudp { lease } => {
+                            // One pump per lease, sealed with the dispatching
+                            // session's token (a rotated session fails closed
+                            // on the old token, like the NAT peers).
+                            let pump_lease = lease.clone();
+                            let lease_route = lease.route;
+                            if !xudp_leases.iter().any(|kept| Arc::ptr_eq(kept, &pump_lease)) {
+                                xudp_leases.push(pump_lease.clone());
+                                let sender = reply_tx.clone();
+                                let stop_token = stop.clone();
+                                let pump_token = token.clone();
+                                xudp_pumps.spawn(async move {
+                                    loop {
+                                        let Some((reply_target, reply_payload)) = pump_lease.recv().await else { return };
+                                        let Some(endpoint) = udp::endpoint_of(&reply_target) else { continue };
+                                        let response = Response {
+                                            key: PeerKey { session: pump_token.session_id(), target: endpoint, route: Some(lease_route) },
+                                            id: 0,
+                                            payload: reply_payload,
+                                            xudp: Some(pump_token.clone()),
+                                        };
+                                        tokio::select! { biased; _=stop_token.cancelled()=>return,
+                                            result=sender.send(response)=>if result.is_err(){return} }
+                                    }
+                                });
+                            }
+                            let duration = limits.operation_timeout;
+                            let stop_token = stop.clone();
+                            let send_target = crate::mux::Target::from_destination(
+                                crate::mux::Network::Udp,
+                                &context_destination,
+                            );
+                            if sends.len() >= limits.max_pending { counters.capacity_drops += 1; continue; }
+                            let payload_size = payload.len();
+                            let send_lease = lease.clone();
+                            sends.spawn(async move {
+                                tokio::select! {
+                                    biased;
+                                    _ = stop_token.cancelled() => Ok(SendReport::Cancelled),
+                                    result = timeout(duration, send_lease.send(send_target, &payload)) => {
+                                        result.map_err(|_| timed_out("XUDP uplink send timed out"))??;
+                                        Ok(SendReport::Uplink(payload_size))
+                                    }
+                                }
+                            });
+                            continue;
+                        }
                     };
                     target.set_ip(udp::canonical_ip(target.ip()));
                     if !udp::valid_endpoint(target) { counters.dispatch_errors += 1; continue; }
@@ -242,14 +292,20 @@ impl Ss2022UdpListener {
                 }
                 response = reply_rx.recv() => {
                     let Some(response) = response else { continue; };
-                    let Some(entry) = peers.get_mut(&response.key).filter(|peer| peer.id == response.id) else { continue; };
-                    entry.last_activity = Instant::now();
+                    let token = match response.xudp {
+                        Some(token) => token,
+                        None => {
+                            let Some(entry) = peers.get_mut(&response.key).filter(|peer| peer.id == response.id) else { continue; };
+                            entry.last_activity = Instant::now();
+                            entry.token.clone()
+                        }
+                    };
                     let unix = match unix_now() {
                         Ok(unix) => unix,
                         Err(error) => break Err(error),
                     };
                     let origin = Destination::from(response.key.target);
-                    let reply = server.encode_reply(&entry.token, &origin, &response.payload, unix, Instant::now(), &mut OsRng);
+                    let reply = server.encode_reply(&token, &origin, &response.payload, unix, Instant::now(), &mut OsRng);
                     let reply = match reply {
                         Ok(reply) => reply,
                         Err(error) => {
@@ -345,6 +401,9 @@ struct Response {
     key: PeerKey,
     id: u64,
     payload: Vec<u8>,
+    /// XUDP lease replies bypass the NAT-peer bookkeeping and seal with the
+    /// session token captured when the lease's pump was created.
+    xudp: Option<SessionToken>,
 }
 
 enum SendReport {
@@ -400,6 +459,7 @@ async fn receive_responses(
             key,
             id,
             payload: buffer[..size].to_vec(),
+            xudp: None,
         };
         tokio::select! {
             biased;

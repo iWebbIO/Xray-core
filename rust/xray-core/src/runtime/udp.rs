@@ -71,6 +71,12 @@ pub enum DispatchAction {
         route: usize,
         counters: TrafficCounters,
     },
+    /// The packet was forwarded into an XUDP session of a mux-enabled
+    /// outbound; replies arrive on the lease's channel (keyed by the
+    /// dispatch's source peer, so exactly one association polls it).
+    Xudp {
+        lease: std::sync::Arc<super::mux_runtime::XudpLease>,
+    },
 }
 
 pub type DispatchFuture = Pin<Box<dyn Future<Output = io::Result<DispatchAction>> + Send>>;
@@ -253,11 +259,14 @@ impl Association {
         let stop = CancellationToken::new();
         let mut peers: HashMap<PeerKey, Peer> = HashMap::new();
         let mut readers = JoinSet::new();
-        let mut pending: JoinSet<(io::Result<DispatchAction>, Vec<u8>)> = JoinSet::new();
+        let mut pending: JoinSet<(io::Result<DispatchAction>, Vec<u8>, Destination)> =
+            JoinSet::new();
         let mut sends: JoinSet<io::Result<SendReport>> = JoinSet::new();
         let (responses_tx, mut responses) = mpsc::channel::<Response>(limits.response_queue);
         let mut next_id = 0u64;
         let mut counters = Counters::default();
+        let mut xudp_pumps = tokio::task::JoinSet::new();
+        let mut xudp_leases: Vec<std::sync::Arc<super::mux_runtime::XudpLease>> = Vec::new();
         // Large enough to detect and discard an oversized datagram without
         // truncating it into a syntactically valid 8192-byte packet.
         let mut packet = vec![0; 65_536];
@@ -291,12 +300,62 @@ impl Association {
                     if let Some(completed) = completed { apply_send_report(&mut counters, completed); }
                 },
                 completed = pending.join_next(), if !pending.is_empty() => {
-                    let Some(Ok((action, payload))) = completed else { counters.dispatch_errors += 1; continue; };
+                    let Some(Ok((action, payload, datagram_destination))) = completed else { counters.dispatch_errors += 1; continue; };
                     let action = match action { Ok(action) => action, Err(_) => { counters.dispatch_errors += 1; continue; } };
                     let (mut target, route, outbound_counters) = match action {
                         DispatchAction::Drop => { counters.policy_drops += 1; continue; }
                         DispatchAction::Direct(target) => (target, None, TrafficCounters::default()),
                         DispatchAction::TrackedDirect { target, route, counters } => (target, Some(route), counters),
+                        DispatchAction::Xudp { lease } => {
+                            // One pump per lease; the packet flows through the
+                            // session with its per-packet target.
+                            let pump_lease = lease.clone();
+                            let lease_route = lease.route;
+                            if !xudp_leases.iter().any(|kept| std::sync::Arc::ptr_eq(kept, &pump_lease)) {
+                                xudp_leases.push(pump_lease.clone());
+                                let sender = responses_tx.clone();
+                                let stop = stop.clone();
+                                let user_counters = user_stats.traffic.clone();
+                                xudp_pumps.spawn(async move {
+                                    loop {
+                                        let Some((target, payload)) = pump_lease.recv().await else { return };
+                                        let size = payload.len();
+                                        user_counters.add_downlink(size);
+                                        let Some(endpoint) = endpoint_of(&target) else { continue };
+                                        let response = Response {
+                                            key: PeerKey {
+                                                target: endpoint,
+                                                route: Some(lease_route),
+                                            },
+                                            id: 0,
+                                            payload,
+                                            xudp: true,
+                                        };
+                                        tokio::select! { biased; _=stop.cancelled()=>return,
+                                            result=sender.send(response)=>if result.is_err(){return} }
+                                    }
+                                });
+                            }
+                            let duration = limits.operation_timeout;
+                            let stop = stop.clone();
+                            let send_target = crate::mux::Target::from_destination(
+                                crate::mux::Network::Udp,
+                                &datagram_destination,
+                            );
+                            if sends.len() >= limits.max_pending { counters.capacity_drops += 1; continue; }
+                            counters.uplink_bytes = counters.uplink_bytes.saturating_add(payload.len() as u64);
+                            sends.spawn(async move {
+                                tokio::select! {
+                                    biased;
+                                    _ = stop.cancelled() => Ok(SendReport::Cancelled),
+                                    result = timeout(duration, lease.send(send_target, &payload)) => {
+                                        result.map_err(|_| timed_out("XUDP uplink send timed out"))??;
+                                        Ok(SendReport::Uplink(payload.len()))
+                                    }
+                                }
+                            });
+                            continue;
+                        }
                     };
                     target.set_ip(canonical_ip(target.ip()));
                     if !valid_endpoint(target) { counters.dispatch_errors += 1; continue; }
@@ -342,13 +401,15 @@ impl Association {
                 }
                 response = responses.recv() => {
                     let Some(response) = response else { continue; };
-                    let Some(entry) = peers.get_mut(&response.key).filter(|peer|peer.id==response.id) else { continue; };
+                    if !response.xudp {
+                        let Some(entry) = peers.get_mut(&response.key).filter(|peer|peer.id==response.id) else { continue; };
+                        entry.last_activity = Instant::now();
+                    }
                     if sends.len() >= limits.max_pending { counters.capacity_drops += 1; continue; }
                     let encoded = match encode_socks5_packet(&Destination::from(response.key.target),&response.payload) {
                         Ok(packet) => packet, Err(_) => { counters.malformed_packets += 1; continue; }
                     };
                     let Some(remote) = session.response_target(Instant::now()) else { continue; };
-                    entry.last_activity = Instant::now();
                     let socket = Arc::clone(&socket);
                     let stop = stop.clone();
                     let duration = limits.operation_timeout;
@@ -382,7 +443,7 @@ impl Association {
                     user_stats.traffic.add_uplink(datagram.payload.len());
                     counters.accepted_packets+=1;
                     if pending.len()>=limits.max_pending {counters.capacity_drops+=1;continue;}
-                    let context=DispatchContext {destination:datagram.destination,source,inbound_tag:Arc::clone(&inbound_tag),user:Arc::clone(&user),network:"udp"};
+                    let context=DispatchContext {destination:datagram.destination.clone(),source,inbound_tag:Arc::clone(&inbound_tag),user:Arc::clone(&user),network:"udp"};
                     let dispatcher=Arc::clone(&dispatcher);
                     let duration=limits.operation_timeout;
                     let stop=stop.clone();
@@ -392,7 +453,7 @@ impl Association {
                             _=stop.cancelled()=>Err(io::Error::new(io::ErrorKind::Interrupted,"UDP association closed")),
                             result=timeout(duration,dispatcher.dispatch(context))=>result.unwrap_or_else(|_|Err(timed_out("UDP dispatch timed out"))),
                         };
-                        (action,datagram.payload)
+                        (action,datagram.payload,datagram.destination)
                     });
                 }
             }
@@ -435,6 +496,9 @@ struct Response {
     key: PeerKey,
     id: u64,
     payload: Vec<u8>,
+    /// XUDP lease replies bypass the NAT-peer bookkeeping (the lease pump
+    /// owns their lifecycle) and encode with their reply target.
+    xudp: bool,
 }
 enum SendReport {
     Uplink(usize),
@@ -525,8 +589,18 @@ async fn receive_responses(
             key,
             id,
             payload: buffer[..size].to_vec(),
+            xudp: false,
         };
         tokio::select! {biased; _=stop.cancelled()=>return,result=sender.send(response)=>if result.is_err(){return}}
+    }
+}
+
+/// The reply endpoint of an XUDP packet target; domain-hosted reply sources
+/// have no SOCKS address form and are dropped.
+pub(super) fn endpoint_of(target: &crate::mux::Target) -> Option<SocketAddr> {
+    match &target.host {
+        crate::mux::Host::Ip(ip) => Some(SocketAddr::new(*ip, target.port)),
+        crate::mux::Host::Domain(_) => None,
     }
 }
 

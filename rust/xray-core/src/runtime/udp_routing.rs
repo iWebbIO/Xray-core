@@ -58,6 +58,12 @@ enum Capability {
         redirect: Option<Destination>,
         final_rules: FinalRules,
     },
+    /// A mux-enabled outbound: UDP packets ride an XUDP (or plain mux)
+    /// session of its carrier pool, exactly like Go's xudp/mux ClientManager.
+    Tunnel {
+        pool: std::sync::Arc<super::mux_runtime::MuxPool>,
+        udp443: crate::config::Udp443Policy,
+    },
     Drop,
     Unsupported,
 }
@@ -75,6 +81,12 @@ impl RouteOutbound {
         outbound: &Outbound,
         stream: &StreamSettings,
         tag: impl Into<String>,
+        // The mux carrier pool serving UDP for this outbound (the XUDP pool
+        // when configured, else the plain TCP pool) and its UDP/443 policy.
+        mux: Option<(
+            &std::sync::Arc<super::mux_runtime::MuxPool>,
+            crate::config::Udp443Policy,
+        )>,
     ) -> Self {
         let bare = matches!(stream.network.as_str(), "" | "raw" | "tcp")
             && matches!(stream.security.as_str(), "" | "none")
@@ -95,6 +107,15 @@ impl RouteOutbound {
                 final_rules: final_rules.clone(),
             },
             Outbound::Blackhole { .. } => Capability::Drop,
+            // A mux-enabled outbound tunnels UDP through its carrier pool
+            // (Go's xudp manager, or the plain mux manager when XUDP is off).
+            _ if mux.is_some() => {
+                let (pool, udp443) = mux.expect("checked above");
+                Capability::Tunnel {
+                    pool: pool.clone(),
+                    udp443,
+                }
+            }
             _ => Capability::Unsupported,
         };
         Self {
@@ -110,6 +131,15 @@ struct Inner {
     outbounds: Vec<RouteOutbound>,
     inbound_protocol: Arc<str>,
     resolver: Arc<dyn UdpResolver>,
+    /// Open XUDP leases keyed by (route, source peer, target): one session
+    /// per association endpoint, so replies keep session affinity (Go's
+    /// dispatcher keys its UDP NAT the same way).
+    xudp: tokio::sync::Mutex<
+        std::collections::HashMap<
+            (usize, std::net::SocketAddr, Destination),
+            std::sync::Arc<super::mux_runtime::XudpLease>,
+        >,
+    >,
 }
 
 #[derive(Clone)]
@@ -136,6 +166,7 @@ impl RoutingDispatcher {
                 outbounds,
                 inbound_protocol: inbound_protocol.into(),
                 resolver,
+                xudp: Default::default(),
             }),
         })
     }
@@ -159,6 +190,7 @@ impl RoutingDispatcher {
             outbounds,
             inbound_protocol: Arc::clone(&self.inner.inbound_protocol),
             resolver: Arc::clone(&self.inner.resolver),
+            xudp: Default::default(),
         });
         self
     }
@@ -195,10 +227,44 @@ impl UdpDispatcher for RoutingDispatcher {
                         format!("outbound {:?} does not support native UDP", outbound.tag),
                     ));
                 }
+                Capability::Tunnel { pool, udp443 } => {
+                    // Go's UDP/443 gate runs before either mux manager.
+                    if context.destination.port == 443 {
+                        match udp443 {
+                            crate::config::Udp443Policy::Reject => {
+                                return Err(io::Error::other("XUDP rejected UDP/443 traffic"));
+                            }
+                            crate::config::Udp443Policy::Skip => {
+                                return Err(io::Error::other(
+                                    "xudpProxyUDP443=skip requires native outbound UDP,                                      which is not integrated in this runtime build",
+                                ));
+                            }
+                            crate::config::Udp443Policy::Allow => {}
+                        }
+                    }
+                    // One lease per (route, source peer, target); the caller
+                    // sends every packet through it with per-packet targets,
+                    // and a dead session is replaced on the next dispatch.
+                    let key = (selected, context.source, context.destination.clone());
+                    let mut leases = inner.xudp.lock().await;
+                    if let Some(lease) = leases.get(&key)
+                        && !lease.is_closed()
+                    {
+                        return Ok(DispatchAction::Xudp {
+                            lease: lease.clone(),
+                        });
+                    }
+                    let lease = pool
+                        .open_xudp(selected, &context.destination)
+                        .await
+                        .map_err(io::Error::other)?;
+                    leases.insert(key, lease.clone());
+                    return Ok(DispatchAction::Xudp { lease });
+                }
                 Capability::Direct {
                     redirect,
                     final_rules,
-                } => (redirect, final_rules),
+                } => (redirect.clone(), final_rules.clone()),
             };
             let destination = redirect.as_ref().unwrap_or(&context.destination);
             if !super::udp::valid_destination(destination) {
@@ -303,7 +369,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, (outbound, stream))| {
-                    RouteOutbound::from_config(outbound, stream, format!("out-{index}"))
+                    RouteOutbound::from_config(outbound, stream, format!("out-{index}"), None)
                 })
                 .collect(),
             "socks",

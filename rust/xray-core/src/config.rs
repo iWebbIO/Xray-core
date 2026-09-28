@@ -98,6 +98,88 @@ pub struct OutboundConfig {
     pub settings: Value,
     #[serde(default)]
     pub stream_settings: StreamSettings,
+    #[serde(default)]
+    pub mux: Option<MuxSettings>,
+}
+
+/// Go's `MuxConfig` (infra/conf/xray.go): Mux.Cool multiplexing over the
+/// outbound's own proxy connections.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MuxSettings {
+    pub enabled: bool,
+    pub concurrency: i16,
+    #[serde(rename = "xudpConcurrency")]
+    pub xudp_concurrency: i16,
+    #[serde(rename = "xudpProxyUDP443")]
+    pub xudp_proxy_udp443: String,
+}
+
+/// Stream limits of one Mux.Cool carrier connection (Go ClientStrategy).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PoolLimits {
+    pub max_concurrency: usize,
+    pub max_connections: usize,
+}
+
+/// Go's `xudpProxyUDP443` policy for UDP/443 traffic on mux outbounds.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Udp443Policy {
+    #[default]
+    Reject,
+    Allow,
+    Skip,
+}
+
+/// The compiled multiplexing plan of one outbound (Go proxyman/outbound
+/// Handler: one TCP carrier pool, one XUDP carrier pool, and the UDP/443
+/// policy; a `None` pool means that traffic bypasses mux).
+#[derive(Clone, Debug)]
+pub(crate) struct MuxPlan {
+    pub tcp: Option<PoolLimits>,
+    pub xudp: Option<PoolLimits>,
+    pub udp443: Udp443Policy,
+}
+
+impl MuxSettings {
+    /// Go's `MuxConfig.Build` plus the handler's strategy defaults:
+    /// concurrency < 0 disables TCP mux, 0 becomes 8; xudpConcurrency < 0
+    /// disables XUDP, 0 leaves XUDP off (UDP rides the plain mux pool);
+    /// `xudpProxyUDP443` defaults to reject and must name a known policy.
+    pub(crate) fn compile(&self, protocol: &str) -> Result<Option<MuxPlan>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            protocol != "masque",
+            "masque outbound does not support \"mux\""
+        );
+        let udp443 = match self.xudp_proxy_udp443.as_str() {
+            "" => Udp443Policy::Reject,
+            "reject" => Udp443Policy::Reject,
+            "allow" => Udp443Policy::Allow,
+            "skip" => Udp443Policy::Skip,
+            other => anyhow::bail!("unknown \"xudpProxyUDP443\": {other}"),
+        };
+        let limits = |concurrency: i16, default: usize| -> Option<PoolLimits> {
+            match concurrency {
+                negative if negative < 0 => None,
+                0 => Some(PoolLimits {
+                    max_concurrency: default,
+                    max_connections: 128,
+                }),
+                positive => Some(PoolLimits {
+                    max_concurrency: positive as usize,
+                    max_connections: 128,
+                }),
+            }
+        };
+        Ok(Some(MuxPlan {
+            tcp: limits(self.concurrency, 8),
+            xudp: limits(self.xudp_concurrency, 8),
+            udp443,
+        }))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -509,6 +591,8 @@ pub(crate) struct ValidatedConfig {
     pub inbounds: Vec<(InboundConfig, Inbound, crate::transport::InboundTransport)>,
     pub outbounds: Vec<Outbound>,
     pub outbound_transports: Vec<crate::transport::OutboundTransport>,
+    /// Mux.Cool plans aligned with `outbounds` (None = no multiplexing).
+    pub mux: Vec<Option<MuxPlan>>,
     pub router: Router,
 }
 
@@ -603,6 +687,7 @@ impl Config {
         let mut outbound_tags = HashSet::new();
         let mut outbounds = Vec::new();
         let mut outbound_transports = Vec::new();
+        let mut mux = Vec::new();
         for raw in &self.outbounds {
             ensure!(
                 raw.tag.is_empty() || outbound_tags.insert(raw.tag.as_str()),
@@ -614,6 +699,11 @@ impl Config {
                 .outbound_transport()
                 .with_context(|| format!("outbound {:?}", raw.tag))?;
             outbound_transports.push(transport);
+            let plan = match &raw.mux {
+                Some(settings) => settings.compile(&raw.protocol)?,
+                None => None,
+            };
+            mux.push(plan);
             outbounds.push(match raw.protocol.as_str() {
                 "freedom" => {
                     let settings: FreedomSettings = serde_json::from_value(raw.settings.clone()).context("freedom settings")?;
@@ -669,11 +759,13 @@ impl Config {
             );
             outbounds.push(Outbound::Api);
             outbound_transports.push(crate::transport::OutboundTransport::default());
+            mux.push(None);
             routing_outbounds.push(OutboundConfig {
                 tag: api.tag.clone(),
                 protocol: "internal-api".into(),
                 settings: empty_object(),
                 stream_settings: StreamSettings::default(),
+                mux: None,
             });
         }
         // Reverse portal tags are routing outbounds exactly like Go's portal
@@ -691,6 +783,7 @@ impl Config {
                     protocol: "reverse-portal".into(),
                     settings: empty_object(),
                     stream_settings: StreamSettings::default(),
+                    mux: None,
                 });
             }
         }
@@ -703,6 +796,7 @@ impl Config {
             inbounds,
             outbounds,
             outbound_transports,
+            mux,
             router,
         })
     }

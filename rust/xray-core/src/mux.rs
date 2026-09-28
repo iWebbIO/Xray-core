@@ -443,6 +443,12 @@ pub struct SessionSender {
 }
 
 impl SessionSender {
+    /// The session's terminal state: closed by either side or failed.
+    pub fn is_closed(&self) -> bool {
+        self.state.closed.load(std::sync::atomic::Ordering::Acquire)
+            || self.shared.cancel.is_cancelled()
+    }
+
     fn failure(&self) -> Option<io::Error> {
         self.state
             .failure

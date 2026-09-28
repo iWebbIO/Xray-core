@@ -21,16 +21,21 @@ pub(super) fn dispatcher(
     stats: Option<&StatsManager>,
     system: SystemStatsPolicy,
     resolver: Arc<dyn udp_routing::UdpResolver>,
+    // Mux carrier pools aligned with `outbounds` (the XUDP pool when
+    // configured, else the plain TCP pool) with their UDP/443 policies.
+    mux: &[Option<super::mux_runtime::MuxUdpRoute>],
 ) -> Result<Arc<dyn udp::UdpDispatcher>> {
     let routes = outbounds
         .iter()
         .enumerate()
         .map(|(index, outbound)| {
+            let mux = mux.get(index).and_then(|mux| mux.as_ref());
             if let Some(raw) = config.outbounds.get(index) {
                 udp_routing::RouteOutbound::from_config(
                     outbound,
                     &raw.stream_settings,
                     raw.tag.clone(),
+                    mux.map(|mux| (mux.pool(), mux.udp443())),
                 )
             } else {
                 udp_routing::RouteOutbound::from_config(
@@ -42,6 +47,7 @@ pub(super) fn dispatcher(
                         .expect("internal API outbound")
                         .tag
                         .clone(),
+                    mux.map(|mux| (mux.pool(), mux.udp443())),
                 )
             }
         })

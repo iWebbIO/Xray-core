@@ -82,6 +82,8 @@ pub(super) async fn serve(
     let (reader, writer) = tokio::io::split(stream);
     let (frame_tx, mut frame_rx) = mpsc::channel::<UdpFrame>(limits.response_queue);
     let (reply_tx, mut reply_rx) = mpsc::channel::<Response>(limits.response_queue);
+    let mut xudp_pumps = tokio::task::JoinSet::new();
+    let mut xudp_leases: Vec<Arc<super::mux_runtime::XudpLease>> = Vec::new();
     let (out_tx, out_rx) = mpsc::channel::<UdpFrame>(limits.response_queue);
     let stop = CancellationToken::new();
 
@@ -159,12 +161,57 @@ pub(super) async fn serve(
                 );
             }
             completed = pending.join_next(), if !pending.is_empty() => {
-                let Some(Ok((action, payload))) = completed else { counters.dispatch_errors += 1; continue; };
+                let Some(Ok((action, payload, frame_destination))) = completed else { counters.dispatch_errors += 1; continue; };
                 let action = match action { Ok(action) => action, Err(_) => { counters.dispatch_errors += 1; continue; } };
                 let (mut target, route, outbound_counters) = match action {
                     udp::DispatchAction::Drop => { counters.policy_drops += 1; continue; }
                     udp::DispatchAction::Direct(target) => (target, None, TrafficCounters::default()),
                     udp::DispatchAction::TrackedDirect { target, route, counters } => (target, Some(route), counters),
+                    udp::DispatchAction::Xudp { lease } => {
+                        // One pump per lease; the packet flows through the
+                        // session with its per-packet target.
+                        let pump_lease = lease.clone();
+                        let lease_route = lease.route;
+                        if !xudp_leases.iter().any(|kept| Arc::ptr_eq(kept, &pump_lease)) {
+                            xudp_leases.push(pump_lease.clone());
+                            let sender = reply_tx.clone();
+                            let stop_token = stop.clone();
+                            xudp_pumps.spawn(async move {
+                                loop {
+                                    let Some((reply_target, payload)) = pump_lease.recv().await else { return };
+                                    let Some(endpoint) = udp::endpoint_of(&reply_target) else { continue };
+                                    let response = Response {
+                                        key: PeerKey { target: endpoint, route: Some(lease_route) },
+                                        id: 0,
+                                        payload,
+                                        xudp: true,
+                                    };
+                                    tokio::select! { biased; _=stop_token.cancelled()=>return,
+                                        result=sender.send(response)=>if result.is_err(){return} }
+                                }
+                            });
+                        }
+                        let duration = limits.operation_timeout;
+                        let stop_token = stop.clone();
+                        let send_target = crate::mux::Target::from_destination(
+                            crate::mux::Network::Udp,
+                            &frame_destination,
+                        );
+                        if sends.len() >= limits.max_pending { counters.capacity_drops += 1; continue; }
+                        let payload_size = payload.len();
+                        let send_lease = lease.clone();
+                        sends.spawn(async move {
+                            tokio::select! {
+                                biased;
+                                _ = stop_token.cancelled() => Ok(SendReport::Cancelled),
+                                result = timeout(duration, send_lease.send(send_target, &payload)) => {
+                                    result.map_err(|_| timed_out("XUDP uplink send timed out"))??;
+                                    Ok(SendReport::Uplink(payload_size))
+                                }
+                            }
+                        });
+                        continue;
+                    }
                 };
                 target.set_ip(udp::canonical_ip(target.ip()));
                 if !udp::valid_endpoint(target) { counters.dispatch_errors += 1; continue; }
@@ -251,6 +298,7 @@ pub(super) async fn serve(
     // Tear down: stop peers and in-flight work, then let the reply writer
     // flush the close frame and shut the TCP stream down, bounded.
     stop.cancel();
+    xudp_pumps.abort_all();
     peers.clear();
     pending.abort_all();
     readers.abort_all();
@@ -291,7 +339,7 @@ pub(super) async fn serve(
 #[allow(clippy::too_many_arguments)] // the association state is iterated per frame
 fn enqueue_dispatch(
     frame: UdpFrame,
-    pending: &mut JoinSet<(io::Result<udp::DispatchAction>, Vec<u8>)>,
+    pending: &mut JoinSet<(io::Result<udp::DispatchAction>, Vec<u8>, Destination)>,
     counters: &mut Counters,
     limits: &udp::Limits,
     source: SocketAddr,
@@ -309,8 +357,9 @@ fn enqueue_dispatch(
         counters.capacity_drops += 1;
         return;
     }
+    let destination = frame.destination;
     let context = udp::DispatchContext {
-        destination: frame.destination,
+        destination: destination.clone(),
         source,
         inbound_tag: Arc::clone(inbound_tag),
         user: Arc::clone(user),
@@ -328,7 +377,7 @@ fn enqueue_dispatch(
                 result.unwrap_or_else(|_| Err(timed_out("Trojan UDP dispatch timed out")))
             }
         };
-        (action, payload)
+        (action, payload, destination)
     });
 }
 
@@ -374,6 +423,9 @@ struct Response {
     key: PeerKey,
     id: u64,
     payload: Vec<u8>,
+    /// XUDP lease replies bypass the NAT-peer bookkeeping (the lease pump
+    /// owns their lifecycle) and frame with their reply target.
+    xudp: bool,
 }
 
 enum SendReport {
@@ -429,6 +481,7 @@ async fn receive_responses(
             key,
             id,
             payload: buffer[..size].to_vec(),
+            xudp: false,
         };
         tokio::select! {
             biased;

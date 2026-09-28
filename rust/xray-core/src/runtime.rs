@@ -15,6 +15,7 @@ mod burst_observatory;
 mod dialer_proxy;
 mod dns_runtime;
 mod handler_registry;
+mod mux_runtime;
 mod observatory;
 mod reverse_runtime;
 mod sniffing;
@@ -69,6 +70,9 @@ struct Dispatcher {
     masque: tokio::sync::Mutex<
         std::collections::HashMap<usize, std::sync::Arc<crate::transport::masque::MasqueClient>>,
     >,
+    /// Mux.Cool carrier pools per outbound, aligned with `outbounds`
+    /// (Go's two ClientManagers per mux-enabled outbound handler).
+    mux: Vec<Option<mux_runtime::MuxOutbound>>,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -132,31 +136,55 @@ impl Server {
             })
             .unwrap_or_default();
         let router = Arc::new(compiled.router);
-        let needs_udp = compiled
-            .inbounds
+        // Mux.Cool carrier pools, one pair per mux-enabled outbound; each
+        // pool dials its carriers through the dispatcher (weak-linked after
+        // construction). The UDP routing view exposes the pool serving UDP
+        // for each outbound (XUDP pool when configured, else the plain TCP
+        // pool, like Go's ClientManager choice) with its UDP/443 policy.
+        let mux_pools: Vec<Option<mux_runtime::MuxOutbound>> = compiled
+            .mux
             .iter()
-            .any(|(_, inbound, _)| match inbound {
-                Inbound::Socks(settings) => settings.udp,
-                Inbound::Trojan { udp, .. } => *udp,
-                Inbound::Shadowsocks2022 { udp, .. } => *udp,
-                _ => false,
-            });
+            .map(|plan| {
+                plan.as_ref().map(|plan| mux_runtime::MuxOutbound {
+                    tcp: plan
+                        .tcp
+                        .map(|limits| mux_runtime::MuxPool::new(limits, crate::mux::Network::Tcp)),
+                    xudp: plan
+                        .xudp
+                        .map(|limits| mux_runtime::MuxPool::new(limits, crate::mux::Network::Udp)),
+                    udp443: plan.udp443,
+                })
+            })
+            .collect();
+        let mux_udp_routes: Vec<Option<mux_runtime::MuxUdpRoute>> = mux_pools
+            .iter()
+            .map(|pools| {
+                pools.as_ref().map(|pools| mux_runtime::MuxUdpRoute {
+                    pool: pools
+                        .xudp
+                        .clone()
+                        .or_else(|| pools.tcp.clone())
+                        .expect("a mux plan has at least one pool"),
+                    udp443: pools.udp443,
+                })
+            })
+            .collect();
+        // The UDP routing dispatcher is always installed: SOCKS/Trojan/SS2022
+        // associations dispatch through it, XUDP carrier sessions arrive on
+        // any inbound, and Go's dispatcher always owns the UDP NAT.
         let udp_resolver: Arc<dyn udp_routing::UdpResolver> = match &compiled.dns {
             Some(app) => dns_runtime::resolver(app.clone()),
             None => Arc::new(udp_routing::SystemResolver),
         };
-        let udp = if needs_udp {
-            Some(udp_integration::dispatcher(
-                &config,
-                &compiled.outbounds,
-                router.clone(),
-                stats.as_deref(),
-                policy.for_system().stats,
-                udp_resolver,
-            )?)
-        } else {
-            None
-        };
+        let udp = Some(udp_integration::dispatcher(
+            &config,
+            &compiled.outbounds,
+            router.clone(),
+            stats.as_deref(),
+            policy.for_system().stats,
+            udp_resolver,
+            &mux_udp_routes,
+        )?);
         let mut api_listener = None;
         let mut api_channel = None;
         let mut api_sender = None;
@@ -254,7 +282,16 @@ impl Server {
             reverse: Default::default(),
             wireguard: wireguard_runtime::WireguardPool::new(),
             masque: Default::default(),
+            mux: mux_pools,
         });
+        for outbound_mux in dispatcher.mux.iter().flatten() {
+            for pool in [&outbound_mux.tcp, &outbound_mux.xudp]
+                .into_iter()
+                .flatten()
+            {
+                pool.attach(&dispatcher);
+            }
+        }
         let observatory = compiled
             .observatory
             .map(|compiled| observatory::new(compiled, dispatcher.clone()))
@@ -558,7 +595,7 @@ async fn handle_stream(
     bound: SocketAddr,
     inbound: &Inbound,
     tag: &str,
-    dispatcher: &Dispatcher,
+    dispatcher: &Arc<Dispatcher>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let policy = dispatcher.policy.for_level(0);
@@ -569,7 +606,7 @@ async fn handle_stream(
             true,
         );
     }
-    let (mut stream, handshake) = tokio::select! {
+    let (stream, handshake) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Ok(()),
         result = timeout(policy.timeouts.handshake, proxy_handshake(stream, inbound)) => result.context("proxy handshake timed out")??,
@@ -600,6 +637,94 @@ async fn handle_stream(
             return trojan_udp_runtime::serve(stream, request, dispatcher, tag, cancel).await;
         }
     };
+    dispatch_request(
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy,
+    )
+    .await
+}
+
+/// Route, establish and relay one authenticated inbound request (the
+/// post-handshake half of `handle_stream`). A request targeting the Mux.Cool
+/// address turns the connection body into a carrier (Go's proxyman inbound
+/// wraps every dispatcher with `mux.NewServer`; the check is on the address
+/// alone). Sessions arriving inside a carrier dispatch through
+/// `dispatch_common`, which does not intercept again — nested carriers fail
+/// explicitly instead of recursing.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_request(
+    mut stream: BoxStream,
+    source: SocketAddr,
+    bound: SocketAddr,
+    inbound: &Inbound,
+    tag: &str,
+    dispatcher: &Arc<Dispatcher>,
+    cancel: &CancellationToken,
+    request: protocol::Request,
+    vision: Option<[u8; 16]>,
+    policy: crate::features::policy::SessionPolicy,
+) -> Result<()> {
+    // A request whose destination address is v1.mux.cool turns the
+    // connection body into a Mux.Cool carrier. The carrier runs on its own
+    // task: its sessions dispatch back through the runtime, and a directly
+    // awaited carrier would make the recursive future unprovable.
+    if matches!(&request.destination.address, crate::address::Address::Domain(domain)
+        if domain == crate::mux::MUX_DOMAIN)
+    {
+        request.reply.success(&mut stream, bound).await?;
+        if let Err(error) = dispatcher
+            .logger
+            .write_access(&crate::logging::AccessRecord::accepted(
+                source,
+                &request.destination,
+            ))
+        {
+            tracing::warn!(%error, "cannot write access record");
+        }
+        let carrier_dispatcher = Arc::clone(dispatcher);
+        let carrier_inbound = Arc::new(inbound.clone());
+        let carrier_tag: Arc<str> = tag.into();
+        let carrier_user = request.user.clone();
+        let carrier_cancel = cancel.clone();
+        let carrier = tokio::spawn(async move {
+            let carrier: std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
+            > = Box::pin(mux_runtime::serve_carrier(
+                &carrier_dispatcher,
+                carrier_inbound,
+                carrier_tag,
+                carrier_user,
+                source,
+                stream,
+                &carrier_cancel,
+            ));
+            carrier.await
+        });
+        return match carrier.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::Error::from(error).context("mux carrier task panicked")),
+        };
+    }
+    dispatch_common(
+        stream, source, bound, inbound, tag, dispatcher, cancel, request, vision, policy,
+    )
+    .await
+}
+
+/// The non-intercepting dispatch body shared by fresh requests and Mux.Cool
+/// session requests.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_common(
+    mut stream: BoxStream,
+    source: SocketAddr,
+    bound: SocketAddr,
+    inbound: &Inbound,
+    tag: &str,
+    dispatcher: &Arc<Dispatcher>,
+    cancel: &CancellationToken,
+    request: protocol::Request,
+    vision: Option<[u8; 16]>,
+    policy: crate::features::policy::SessionPolicy,
+) -> Result<()> {
     let exchange = async {
         let idle_since = Instant::now();
         anyhow::ensure!(
@@ -768,6 +893,32 @@ async fn handle_stream(
                     request.reply.success(&mut stream, bound).await?;
                     Dispatch::Relay(upstream)
                 }
+                _ if dispatcher
+                    .mux
+                    .get(selected)
+                    .is_some_and(|mux| mux.as_ref().is_some_and(|mux| mux.tcp.is_some())) =>
+                {
+                    // Go's mux ClientManager: one stream on a shared carrier
+                    // connection to v1.mux.cool:9527 (up to sixteen pick
+                    // attempts across workers).
+                    let upstream = timeout(
+                        DIAL_TIMEOUT,
+                        dispatcher.mux_open_stream(selected, &request.destination),
+                    )
+                    .await
+                    .context("mux outbound connection timed out")
+                    .and_then(|r| r);
+                    let upstream = match upstream {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            record(false, error.to_string());
+                            request.reply.failure(&mut stream, 5).await?;
+                            return Err(error);
+                        }
+                    };
+                    request.reply.success(&mut stream, bound).await?;
+                    Dispatch::Relay(upstream)
+                }
                 _ => {
                     let counters = dispatcher
                         .stats
@@ -884,7 +1035,7 @@ async fn handle_stream(
     }
 }
 
-/// The three inbound session shapes the connection dispatcher understands.
+/// The three inbound session shapes the connection dispatcher understand.
 enum InboundHandshake {
     /// One proxied TCP request; the second field is the matched VLESS
     /// account's UUID when the request rode the Vision flow (the body wrap
