@@ -134,3 +134,45 @@ source at commit 71e232c1):
 
 Validation checkpoints are recorded in notes/PARITY_AUDIT.md. The entire project
 conversion remains active; Go sources and Go release workflows are preserved.
+
+## Checkpoint — September 28, 2026, root wiring (commits 77a47812 + 11284fa8)
+
+The 15 delivered components are wired into the root config and runtime. A
+Phase-0 skeleton (commit 77a47812) landed the final shapes — dns/reverse/
+burstObservatory root keys, the masque transport, REALITY inbound, VLESS
+Vision flows + mlkem768x25519plus encryption, Trojan/SS2022 UDP flags, the
+full freedom domainStrategy set, masque/wireguard outbound protocols, seven
+runtime satellite contracts — and the agents' landed work was integrated and
+finished in commit 11284fa8 (several agents died mid-flight after writing
+their files; their code was completed, corrected and validated centrally).
+
+Now live end to end: VLESS Vision body wrap (both sides, header camouflage),
+VLESS encrypted sessions, REALITY inbound accept, Trojan UDP-over-TCP,
+SS2022 UDP listeners, WireGuard outbound engines (one per settings value),
+freedom domainStrategy through the configured DNS app, the reverse app
+(portal tags as routing outbounds, carrier attach, two-server e2e relay),
+burst observatory, HandlerService listings/user queries (mutations fail
+explicitly with named gaps), MASQUE outbound dispatch (shared h2 client,
+extended-CONNECT per connection), the generic masque transport, and the
+Go-verified YAML 1.1/env compat in the CLI loader.
+
+Deterministic fixes this pass: the burst scheduler test's paused-clock
+quantization (inclusive round window), the WireGuard engine deaths from the
+sync try_send_to surfacing tokio's readiness gate as WouldBlock (the
+transport send is now async/reactor-aware; proved by a minimal socket
+probe), the portal-tag compile catch-22 (portals compile as routing
+outbounds inside Config::compile so routing rules validate), and the
+vless addon test's Go-accuracy (empty addons are the base case; the
+unknown-flow arm carries no account UUID).
+
+Executed: fmt clean, clippy -D warnings clean, cargo test --workspace
+--locked 1062/0/5 (+39 over the batch), Go interop 34/34 + 6/6 + 8/8
+against target/reference-xray.exe (absolute path required — relative
+XRAY_GO_BINARY paths fail from rust/), and all five env-gated Go-fixture
+tests pass (SS2022 both directions/ciphers, XDRIVE local, REALITY
+Go-server, REALITY native-server/client pairs).
+
+Known explicitly-rejected surfaces (unchanged): HandlerService mutations
+(proto-to-config decoder + listener ownership handoff), reverse XUDP,
+2022-blake3-chacha20 UDP, MASQUE HTTP/3, legacy Shadowsocks UDP,
+dokodemo UDP, port ranges, user policy levels.
