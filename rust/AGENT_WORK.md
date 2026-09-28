@@ -176,3 +176,40 @@ Known explicitly-rejected surfaces (unchanged): HandlerService mutations
 (proto-to-config decoder + listener ownership handoff), reverse XUDP,
 2022-blake3-chacha20 UDP, MASQUE HTTP/3, legacy Shadowsocks UDP,
 dokodemo UDP, port ranges, user policy levels.
+
+## Checkpoint — September 28, 2026, final completion batch (commits 5cdf0d66..3fe474ff)
+
+Six commits closing the audit's A/B/C lists. Newly live, all with gates
+(fmt/clippy -D warnings clean; workspace tests 1155/0/5; Go interop 34/6/8;
+all five env-gated Go fixtures green):
+
+- Mux.Cool outbound multiplexing: the "mux" settings with two carrier pools
+  per outbound (TCP + XUDP), the inbound carrier server intercepting every
+  v1.mux.cool request, XUDP packet sessions through the UDP routing
+  dispatcher, and Go's xudpProxyUDP443 policies (skip names its gap).
+- Traffic sniffing: http/tls/quic sniffers with Go's constants and golden
+  bytes, destOverride with routeOnly, sniffed-protocol routing conditions.
+- Encrypted DNS: DoH (h2) and DoT nameservers with #ip bootstrap fragments;
+  routed domain endpoints name the missing runtime dialer.
+- FakeDNS: root fakeDns pools, the fakedns nameserver answering TTL-1 pool
+  leases, and the dispatcher's fake-IP-to-domain swap before routing.
+- Remote config sources (http(s) and Unix sockets); port ranges; the
+  tunnel/mixed/block/direct aliases.
+- sockopt (all 19 Go fields; applicable options apply; the Linux-only ones
+  name their gaps) + PROXY protocol accept with v1/v2 headers.
+- Balancers (balancers/balancerTag, strategies, fallbackTag with explicit
+  unresolvable-fallback rejection), observatory health through the
+  BalancerObservations seam.
+- Shadowsocks 2022 chacha single-key (TCP IETF-ChaCha verified against the
+  pinned Go peer both directions; UDP XChaCha), legacy AEAD SS UDP, and
+  dokodemo UDP.
+- The dns inbound/outbound (hijack + rewrite-forward) and the loopback
+  outbound; user policy levels end to end (accounts → handshakes →
+  PolicyManager.ForLevel); the root env/version/geodata/metrics keys.
+
+Explicitly-rejected surfaces (fail with named errors, never silently):
+nested Mux.Cool carriers; bittorrent/UTP and fakedns sniffing; HTTP/3
+(QUIC) DNS; the geodata download scheduler; the metrics pprof app;
+HandlerService runtime mutations; the convert CLI; hysteria and TUN
+runtimes; TLS fingerprint impersonation (uTLS); routed encrypted DNS
+without bootstrap pins; xudpProxyUDP443=skip.
