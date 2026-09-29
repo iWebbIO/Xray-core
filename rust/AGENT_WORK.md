@@ -263,6 +263,17 @@ XRAY_GO_BINARY path; all five env-gated Go fixtures):
   disableStatelessReset, finalmask mask chains; documented quinn
   deviations: no stateless resets, no Chrome fingerprint parroting.
 
+## Checkpoint — September 29, 2026 — the Go reference tree removed
+
+After the completed, gate-verified translation, the Go implementation left
+the tree: 991 `.go` files, go.mod/go.sum, the four Go fixture peers under
+rust/, the Go CI workflows and Dockerfiles, and the Go-tree artifacts. The
+82 protobuf schemas moved to `rust/xray-proto/proto/` (paths preserved;
+build.rs points there; the generated bindings are unchanged). The reference
+lives in the git history; the built reference binaries remain in `target/`
+for re-verification. Post-removal gates: fmt/clippy clean, workspace
+1268/0/5, interop 34/6/8, fixtures 5/5.
+
 ## Checkpoint — September 29, 2026, handler mutations + five wired modules
 
 Two commits: (1) HandlerService AddInbound/RemoveInbound live through the

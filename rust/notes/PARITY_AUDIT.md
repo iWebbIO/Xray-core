@@ -552,3 +552,27 @@ mirror's unknown fields.
 Final gate state for the whole batch: fmt; clippy -D warnings clean;
 workspace tests **1268/0/5**; Go interop **34/34 + 6/6 + 8/8**; all five
 env-gated Go fixtures green.
+
+## September 29, 2026 — the Go reference implementation removed
+
+With the translation complete and verified, the Go tree is gone: all 991
+tracked `.go` files (the proxy/transport/app/common/infra/main/testing
+sources, the generated `.pb.go` files, the Go assembly), `go.mod`/`go.sum`,
+the four Go interop fixture peers under `rust/`, the Go-only CI workflows
+(tests, release, win7 release, docker, scheduled assets) with the Go
+Dockerfiles, and the Go-tree artifacts (the embedded browser-dialer page,
+the finalmask assembly, test data, coverage scripts). The Go reference is
+preserved verbatim in the git history — check out any commit before the
+removal to rebuild `target/reference-xray` from `./main`.
+
+Kept, deliberately:
+- **The 82 protobuf schemas**, relocated to `rust/xray-proto/proto/` with
+  their paths preserved (the wire-format source of truth; `build.rs` now
+  compiles from there — the generated bindings are unchanged).
+- `Docs/`, the licenses, and the Rust CI (`rust.yml` without the
+  Go-reference interop job, `rust-release.yml`).
+
+Post-removal evidence, all fresh: fmt `--check` clean; clippy
+`-D warnings` clean; workspace tests **1268/0/5** (unchanged); the three
+Go interop suites **34/34 + 6/6 + 8/8** and all five env-gated Go fixtures
+green against the reference binaries still present in `target/`.

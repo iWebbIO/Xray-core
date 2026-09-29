@@ -1,7 +1,9 @@
 # Project X
 
-The native Rust migration is in progress. See [rust/README.md](rust/README.md)
-for build instructions and [rust/MIGRATION.md](rust/MIGRATION.md) for parity status.
+The native Rust migration is complete; the Go reference implementation has
+been removed from the tree (it remains in the git history). See
+[rust/README.md](rust/README.md) for build instructions and
+[rust/MIGRATION.md](rust/MIGRATION.md) for the parity status.
 
 [Project X](https://github.com/XTLS) originates from XTLS protocol, providing a set of network tools such as [Xray-core](https://github.com/XTLS/Xray-core) and [REALITY](https://github.com/XTLS/REALITY).
 

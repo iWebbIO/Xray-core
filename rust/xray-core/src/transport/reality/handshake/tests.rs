@@ -609,10 +609,12 @@ impl Drop for GoFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires XRAY_REALITY_GO_SERVER pointing to compiled handshake/interop/main.go"]
+#[ignore = "requires XRAY_REALITY_GO_SERVER pointing to the fixture built from the pre-removal git history"]
 async fn pinned_go_reality_server_interoperability() {
     let executable = std::env::var_os("XRAY_REALITY_GO_SERVER")
-        .expect("build handshake/interop/main.go and set XRAY_REALITY_GO_SERVER");
+        .expect(
+            "build handshake/interop/main.go from the pre-removal git history and set XRAY_REALITY_GO_SERVER",
+        );
     for (group, use_mldsa) in [("hybrid", false), ("x25519", false), ("hybrid", true)] {
         let mut command = Command::new(&executable);
         command

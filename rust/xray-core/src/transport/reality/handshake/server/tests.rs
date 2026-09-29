@@ -909,11 +909,13 @@ impl Drop for GoClient {
 }
 
 #[tokio::test]
-#[ignore = "requires XRAY_REALITY_GO_CLIENT pointing to compiled server/interop/main.go"]
+#[ignore = "requires XRAY_REALITY_GO_CLIENT pointing to the fixture built from the pre-removal git history"]
 async fn pinned_go_reality_client_interoperability() {
     use std::process::{Command, Stdio};
     let executable = std::env::var_os("XRAY_REALITY_GO_CLIENT")
-        .expect("build server/interop/main.go and set XRAY_REALITY_GO_CLIENT");
+        .expect(
+            "build server/interop/main.go from the pre-removal git history and set XRAY_REALITY_GO_CLIENT",
+        );
     for suite in [
         CipherSuite::Aes128GcmSha256,
         CipherSuite::Aes256GcmSha384,
@@ -971,7 +973,9 @@ async fn pinned_go_target_and_reality_client_interoperability() {
         process::{Command, Stdio},
     };
     let executable = std::env::var_os("XRAY_REALITY_GO_CLIENT")
-        .expect("build server/interop/main.go and set XRAY_REALITY_GO_CLIENT");
+        .expect(
+            "build server/interop/main.go from the pre-removal git history and set XRAY_REALITY_GO_CLIENT",
+        );
     for (name, group) in [
         ("hybrid", KeyExchangeGroup::X25519MlKem768),
         ("x25519", KeyExchangeGroup::X25519),

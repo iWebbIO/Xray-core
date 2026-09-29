@@ -671,7 +671,9 @@ impl Drop for GoFixture {
 
 fn start_go(mode: &str, folder: &PathBuf) -> GoFixture {
     let executable = std::env::var_os("XRAY_XDRIVE_GO_FIXTURE")
-        .expect("build xdrive/interop/main.go and set XRAY_XDRIVE_GO_FIXTURE");
+        .expect(
+            "build xdrive/interop/main.go from the pre-removal git history and set XRAY_XDRIVE_GO_FIXTURE",
+        );
     let mut command = Command::new(executable);
     command
         .arg(mode)
@@ -694,7 +696,7 @@ fn start_go(mode: &str, folder: &PathBuf) -> GoFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires XRAY_XDRIVE_GO_FIXTURE pointing to compiled xdrive/interop/main.go"]
+#[ignore = "requires XRAY_XDRIVE_GO_FIXTURE pointing to the fixture built from the pre-removal git history"]
 async fn pinned_go_xdrive_local_interoperability_in_both_directions() {
     let payload: Vec<_> = (0..131_071).map(|index| (index % 251) as u8).collect();
     let mut params = fast_params();

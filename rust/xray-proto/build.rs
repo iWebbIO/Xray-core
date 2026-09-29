@@ -17,7 +17,10 @@ fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("../..");
+    // The schemas live beside the crate: the wire-format source of truth,
+    // relocated from the retired Go reference tree (paths preserved so the
+    // cross-file imports keep resolving against this root).
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("proto");
     let mut files = Vec::new();
     for dir in ["app", "common", "core", "proxy", "transport"] {
         collect(&root.join(dir), &mut files)?;
