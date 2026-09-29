@@ -97,7 +97,11 @@ pub struct InboundConfig {
     #[serde(default)]
     pub tag: String,
     #[serde(default = "default_listen")]
-    pub listen: IpAddr,
+    pub listen: ListenAddress,
+    /// Go's zero-default port: absent binds an ephemeral port. The TUN and
+    /// unix inbounds bind no TCP listener; the runtime checks the inbound
+    /// variant before this is ever read.
+    #[serde(default = "default_port")]
     pub port: PortSpec,
     pub protocol: String,
     #[serde(default = "empty_object")]
@@ -317,6 +321,8 @@ pub struct StreamSettings {
     pub masque_settings: Option<Value>,
     pub hysteria_settings: Option<Value>,
     pub finalmask: Option<Value>,
+    #[serde(alias = "rawSettings")]
+    pub tcp_settings: Option<Value>,
 }
 
 impl StreamSettings {
@@ -369,6 +375,23 @@ impl StreamSettings {
             self.masque_settings.is_none() || self.network == "masque",
             "masqueSettings requires the masque transport"
         );
+        if let Some(settings) = &self.tcp_settings {
+            ensure!(
+                matches!(self.network.as_str(), "" | "tcp" | "raw"),
+                "tcpSettings requires the plain TCP transport"
+            );
+            match settings.get("header") {
+                None | Some(Value::Null) => bail!(
+                    "the TCP header config must be an object, not null                      (Go: type not found in JSON context)"
+                ),
+                Some(header) => {
+                    let parsed = crate::transport::headers::HeaderSettings::from_value(header)
+                        .context("tcpSettings.header")?;
+                    crate::transport::headers::HeaderCodec::compile(&parsed)
+                        .context("tcpSettings.header")?;
+                }
+            }
+        }
         ensure!(
             self.hysteria_settings.is_none() || self.network == "hysteria",
             "hysteriaSettings requires the hysteria transport"
@@ -396,6 +419,23 @@ impl StreamSettings {
             "the masque transport requires \"security\": \"tls\""
         );
         Ok(())
+    }
+
+    /// The compiled `tcpSettings.header` codec (None when tcpSettings or
+    /// its header object is absent); validated like Go's TCPConfig.Build.
+    pub(crate) fn tcp_header(&self) -> Result<Option<crate::transport::headers::HeaderCodec>> {
+        let Some(settings) = &self.tcp_settings else {
+            return Ok(None);
+        };
+        let Some(header) = settings.get("header") else {
+            return Ok(None);
+        };
+        let parsed = crate::transport::headers::HeaderSettings::from_value(header)
+            .context("tcpSettings.header")?;
+        Ok(Some(
+            crate::transport::headers::HeaderCodec::compile(&parsed)
+                .context("tcpSettings.header")?,
+        ))
     }
 
     /// The compiled `finalmask.quicParams` (Go's nil defaults when absent);
@@ -482,6 +522,7 @@ impl StreamSettings {
                 .as_ref()
                 .map(crate::transport::tls::TlsServer::new)
                 .transpose()?,
+            tcp_header: self.tcp_header()?,
             reality,
             xhttp: xhttp.map(crate::transport::xhttp::Server::new),
             websocket: self.websocket()?,
@@ -520,6 +561,7 @@ impl StreamSettings {
                 .as_ref()
                 .map(crate::transport::tls::TlsClient::new)
                 .transpose()?,
+            tcp_header: self.tcp_header()?,
             server_name: tls
                 .as_ref()
                 .map(|settings| settings.server_name.clone())
@@ -696,6 +738,18 @@ pub enum Inbound {
     Hysteria {
         users: Vec<crate::protocol::hysteria_runtime::HysteriaUser>,
     },
+    /// The TUN device inbound: the compiled entry owns the device and
+    /// netstack configuration; serve() runs it outside the listener loop.
+    /// Boxed: the entry embeds the seam's Inbound value (its dispatch
+    /// identity), which would otherwise recurse through this enum.
+    Tun {
+        entry: std::sync::Arc<crate::runtime::tun_inbound::TunInbound>,
+    },
+    /// The WireGuard server inbound: the compiled entry (settings, device,
+    /// bind); the runtime sets one listen address per port.
+    Wireguard {
+        entry: crate::runtime::wireguard_inbound::WireguardInbound,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -799,9 +853,55 @@ fn compare_versions(left: &str, right: &str) -> Result<std::cmp::Ordering> {
     Ok(left.cmp(&right))
 }
 
-fn default_listen() -> IpAddr {
-    IpAddr::from([0, 0, 0, 0])
+fn default_port() -> PortSpec {
+    PortSpec::from_spec("0").expect("port zero parses")
 }
+
+/// An inbound's `listen` value: an IP address (the TCP/UDP listener binds)
+/// or a filesystem path / abstract name (the unix domain socket listener
+/// binds — Go's system_listener.go UnixAddr branch). A path listen requires
+/// the dokodemo inbound (Go's unix forwarder); everything else names the
+/// conflict.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ListenAddress {
+    Ip(IpAddr),
+    Path(String),
+}
+
+impl std::fmt::Display for ListenAddress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ip(ip) => write!(formatter, "{ip}"),
+            Self::Path(path) => write!(formatter, "{path}"),
+        }
+    }
+}
+
+impl ListenAddress {
+    /// The IP the socket listeners bind; a path listen fails by name.
+    pub fn ip(&self) -> Result<IpAddr> {
+        match self {
+            Self::Ip(ip) => Ok(*ip),
+            Self::Path(path) => bail!(
+                "the unix listen address {path:?} requires the dokodemo-door inbound;                  IP listeners cannot bind a socket path"
+            ),
+        }
+    }
+
+    /// The unix socket path (plain, `@abstract`, or `@@padded`), if any.
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Ip(_) => None,
+        }
+    }
+}
+
+fn default_listen() -> ListenAddress {
+    ListenAddress::Ip(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+}
+
 fn empty_object() -> Value {
     serde_json::json!({})
 }
@@ -1278,6 +1378,14 @@ pub(crate) fn compile_inbound(
     if let Some(sniffing) = &raw.sniffing {
         sniffing.validate().context("inbound sniffing settings")?;
     }
+    // A path `listen` binds a unix domain socket: only the dokodemo
+    // forwarder may own one (Go's unix listener serves dokodemo).
+    if let Some(path) = raw.listen.path() {
+        ensure!(
+            matches!(raw.protocol.as_str(), "dokodemo-door" | "tunnel"),
+            "the unix listen address {path:?} requires the dokodemo-door inbound"
+        );
+    }
     let transport = raw.stream_settings.inbound_transport()?;
     let inbound = match raw.protocol.as_str() {
         // Go registers `mixed` as the SOCKS server config: same handler.
@@ -1335,12 +1443,22 @@ pub(crate) fn compile_inbound(
                 .network
                 .or(settings.allowed_network)
                 .unwrap_or_else(|| "tcp".to_owned());
-            let udp = match network.as_str() {
-                "tcp" => false,
-                "tcp,udp" => true,
-                "udp" => bail!("udp-only dokodemo-door is not supported; use tcp,udp"),
-                other => bail!("unknown dokodemo network {other:?}"),
-            };
+            // Go's NetworkList: comma-separated tcp/udp/unix entries. The
+            // unix entry rides the unix LISTENER (a path `listen`); over a
+            // unix connection dokodemo forwards as TCP (dokodemo.go:76), so
+            // it contributes no UDP here.
+            let mut udp = false;
+            for entry in network.split(',') {
+                match entry {
+                    "tcp" | "unix" => (),
+                    "udp" => udp = true,
+                    other => bail!("unknown dokodemo network {other:?}"),
+                }
+            }
+            ensure!(
+                network.split(',').any(|entry| entry != "udp"),
+                "udp-only dokodemo-door is not supported; use tcp,udp"
+            );
             let host = settings
                 .address
                 .or(settings.rewrite_address)
@@ -1401,6 +1519,18 @@ pub(crate) fn compile_inbound(
             Inbound::Hysteria {
                 users: settings.effective_users().to_vec(),
             }
+        }
+        "tun" => {
+            let entry = crate::runtime::tun_inbound::compile_inbound(&raw.settings)
+                .context("tun inbound settings")?;
+            Inbound::Tun {
+                entry: std::sync::Arc::new(entry),
+            }
+        }
+        "wireguard" => {
+            let entry = crate::runtime::wireguard_inbound::compile_inbound(&raw.settings)
+                .context("WireGuard inbound settings")?;
+            Inbound::Wireguard { entry }
         }
         "dns" => {
             let settings = crate::protocol::dns_proxy::DnsProxySettings::from_value(&raw.settings)
@@ -1609,5 +1739,52 @@ mod tests {
         )
         .unwrap();
         assert!(config.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod tun_wireguard_config_tests {
+    use super::*;
+
+    const SERVER_PRIVATE: &str = "EGs4lTSJPmgELx6YiJAmPR2meWi6bY+e9rTdCipSj10=";
+    const CLIENT_PUBLIC: &str = "osAMIyil18HeZXGGBDC9KpZoM+L2iGyXWVSYivuM9B0=";
+
+    /// The `tun` inbound arm compiles through the real config surface: no
+    /// port key is present (Go's tun binds no listener) and validation
+    /// reaches the runtime entry.
+    #[test]
+    fn tun_inbound_parses_without_a_port_and_compiles() {
+        let config = Config::from_json(
+            r#"{"inbounds":[{"listen":"127.0.0.1","tag":"tun-in","protocol":"tun",
+                 "settings":{"name":"test-tun","gateway":["172.19.0.1/30"],"mtu":1500}}],
+               "outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        config.validate().expect("the tun inbound compiles");
+        // An invalid option names itself at parse time.
+        let rejected = Config::from_json(
+            r#"{"inbounds":[{"protocol":"tun",
+                 "settings":{"name":"x","gateway":["172.19.0.1/30"],"mtu":100}}],
+               "outbounds":[{"protocol":"freedom"}]}"#,
+        )
+        .unwrap();
+        let error = rejected.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("mtu"), "{error:#}");
+    }
+
+    /// The `wireguard` inbound arm compiles with one UDP endpoint per port.
+    #[test]
+    fn wireguard_inbound_parses_and_compiles() {
+        let settings = format!(
+            r#"{{"secretKey":"{SERVER_PRIVATE}","address":["10.0.0.1"],
+                "peers":[{{"publicKey":"{CLIENT_PUBLIC}","allowedIPs":["10.0.0.2/32"]}}]}}"#
+        );
+        let config = Config::from_json(&format!(
+            r#"{{"inbounds":[{{"listen":"127.0.0.1","port":51820,"tag":"wg-in",
+                "protocol":"wireguard","settings":{settings}}}],
+              "outbounds":[{{"protocol":"freedom"}}]}}"#
+        ))
+        .unwrap();
+        config.validate().expect("the wireguard inbound compiles");
     }
 }

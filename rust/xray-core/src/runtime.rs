@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -27,7 +27,7 @@ pub mod tun_inbound;
 pub mod udp;
 mod udp_integration;
 pub mod udp_routing;
-mod wireguard_inbound;
+pub mod wireguard_inbound;
 mod wireguard_runtime;
 
 use crate::{
@@ -111,6 +111,20 @@ impl Server {
         // Created before the app runtimes: the reverse bridges and the
         // handler registry both link their child tasks to this token.
         let cancel_token = CancellationToken::new();
+        // Go's instance startup reloads env settings, arming the browser
+        // dialer when XRAY_BROWSER_DIALER carries an address (the websocket
+        // dialer routes through it).
+        if let Some(address) = crate::transport::browser_dialer::address() {
+            let token = cancel_token.child_token();
+            let arming = crate::transport::browser_dialer::reload(token.clone())
+                .await
+                .with_context(|| format!("cannot start the browser dialer on {address}"));
+            if let Err(error) = arming {
+                // The dialer server failing to bind must not take the whole
+                // runtime down; the next dial through it names the state.
+                tracing::warn!(%error, "browser dialer startup failed");
+            }
+        }
         let policy = config
             .policy
             .as_ref()
@@ -228,6 +242,12 @@ impl Server {
         // The QUIC listeners of the hysteria inbounds: served through the
         // dispatch seam, not the per-stream accept loop.
         let mut hysteria_listeners: Vec<HysteriaListenerEntry> = Vec::new();
+        // The TUN device inbounds (one serve task per inbound, no listener)
+        // and the WireGuard UDP endpoints (one per port).
+        let mut tun_listeners: Vec<TunListenerEntry> = Vec::new();
+        let mut wireguard_listeners: Vec<WireguardListenerEntry> = Vec::new();
+        // The unix domain socket inbounds: one listener per path listen.
+        let mut unix_listeners: Vec<UnixListenerEntry> = Vec::new();
         // Startup inbound snapshots for the HandlerService registry, plus the
         // SS2022 UDP listeners that bind alongside their TCP listener.
         let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
@@ -245,6 +265,53 @@ impl Server {
             let sniff = sniff.map(Arc::new);
             let inbound_cancel = cancel_token.child_token();
             inbound_tokens.insert(raw.tag.clone(), inbound_cancel.clone());
+            // A path `listen` binds a unix domain socket instead of a TCP
+            // listener (Go's system_listener UnixAddr branch): one socket
+            // per inbound, and only the dokodemo forwarder may own it.
+            if let Some(path) = raw.listen.path() {
+                ensure!(
+                    matches!(inbound, Inbound::Dokodemo { .. }),
+                    "the unix listen address {path:?} requires the dokodemo-door inbound"
+                );
+                let address = crate::transport::unix_listener::UnixListenAddress::parse(path)
+                    .with_context(|| format!("inbound {:?} listen", raw.tag))?;
+                let listener = crate::transport::unix_listener::UnixListener::bind(&address)
+                    .await
+                    .with_context(|| format!("cannot bind inbound {:?} on {path}", raw.tag))?;
+                seeds.push((raw.clone(), inbound.clone(), transport.clone()));
+                unix_listeners.push((listener, inbound, raw.tag.clone(), sniff, inbound_cancel));
+                continue;
+            }
+            // TUN owns a device, not a socket: one serve task per inbound
+            // (Go's Network() is empty, so no listener is ever bound).
+            if let Inbound::Tun { entry } = &inbound {
+                seeds.push((raw.clone(), inbound.clone(), transport.clone()));
+                tun_listeners.push((
+                    Arc::clone(entry),
+                    raw.tag.clone(),
+                    sniff.clone(),
+                    inbound_cancel.clone(),
+                ));
+                continue;
+            }
+            // WireGuard owns a UDP endpoint per port: the engine's serve
+            // task binds it, no TCP listener exists.
+            if let Inbound::Wireguard { entry } = &inbound {
+                for port in raw.port.ports() {
+                    let bound = entry
+                        .clone()
+                        .listen_on(SocketAddr::new(raw.listen.ip()?, *port));
+                    addresses.push(SocketAddr::new(raw.listen.ip()?, *port));
+                    seeds.push((raw.clone(), inbound.clone(), transport.clone()));
+                    wireguard_listeners.push((
+                        bound,
+                        raw.tag.clone(),
+                        sniff.clone(),
+                        inbound_cancel.clone(),
+                    ));
+                }
+                continue;
+            }
             for port in raw.port.ports() {
                 // Hysteria owns a QUIC listener per port: no TCP socket is
                 // bound and the streams dispatch through the QUIC seam.
@@ -280,7 +347,7 @@ impl Server {
                     continue;
                 }
                 let listener = match transport
-                    .bind(SocketAddr::new(raw.listen, *port))
+                    .bind(SocketAddr::new(raw.listen.ip()?, *port))
                     .await
                     .with_context(|| {
                         format!(
@@ -320,7 +387,7 @@ impl Server {
             if let Inbound::Shadowsocks { account, udp: true } = inbound {
                 for port in raw.port.ports() {
                     let bound = plain_udp::LegacyShadowsocksUdp::bind(
-                        SocketAddr::new(raw.listen, *port),
+                        SocketAddr::new(raw.listen.ip()?, *port),
                         account,
                     );
                     let bound = match bound {
@@ -343,7 +410,7 @@ impl Server {
             }
             if let Inbound::Dokodemo { udp: true, .. } = inbound {
                 for port in raw.port.ports() {
-                    let address = SocketAddr::new(raw.listen, *port);
+                    let address = SocketAddr::new(raw.listen.ip()?, *port);
                     let Inbound::Dokodemo { destination, .. } = inbound else {
                         unreachable!("checked above");
                     };
@@ -357,7 +424,7 @@ impl Server {
             if let Inbound::Shadowsocks2022 { account, udp: true } = inbound {
                 for port in raw.port.ports() {
                     let bound = ss2022_udp_runtime::Ss2022UdpListener::bind(
-                        SocketAddr::new(raw.listen, *port),
+                        SocketAddr::new(raw.listen.ip()?, *port),
                         account,
                     );
                     let bound = match bound {
@@ -615,6 +682,39 @@ impl Server {
                         .await
                 });
             }
+            for (listener, inbound, tag, sniff, inbound_stop) in unix_listeners {
+                let tag: Arc<str> = Arc::from(tag);
+                tasks.spawn(accept_loop(
+                    InboundListener::Unix(listener),
+                    inbound,
+                    tag.to_string(),
+                    InboundTransport::default(),
+                    sniff,
+                    dispatcher.clone(),
+                    inbound_stop,
+                ));
+            }
+            for (entry, tag, sniff, inbound_stop) in tun_listeners {
+                let dispatcher = dispatcher.clone();
+                let tag: Arc<str> = Arc::from(tag);
+                tasks.spawn(async move {
+                    tun_inbound::serve(
+                        Arc::try_unwrap(entry).unwrap_or_else(|shared| (*shared).clone()),
+                        dispatcher,
+                        tag,
+                        sniff,
+                        inbound_stop,
+                    )
+                    .await
+                });
+            }
+            for (entry, tag, sniff, inbound_stop) in wireguard_listeners {
+                let dispatcher = dispatcher.clone();
+                let tag: Arc<str> = Arc::from(tag);
+                tasks.spawn(async move {
+                    wireguard_inbound::serve(entry, dispatcher, tag, sniff, inbound_stop).await
+                });
+            }
             if tasks.is_empty() {
                 stopping.cancelled().await;
                 return Ok(());
@@ -824,6 +924,34 @@ enum UdpEntry {
 
 /// One bound inbound: its listener, compiled protocol/transport, tag and
 /// compiled sniffing request.
+/// One bound unix domain socket: the listener, the dokodemo inbound it
+/// forwards for, tag, sniffing request and per-tag cancellation token.
+type UnixListenerEntry = (
+    crate::transport::unix_listener::UnixListener,
+    Inbound,
+    String,
+    Option<std::sync::Arc<sniffing::SniffingRequest>>,
+    CancellationToken,
+);
+
+/// One TUN device inbound: the compiled entry, tag, sniffing request and
+/// per-tag cancellation token.
+type TunListenerEntry = (
+    Arc<crate::runtime::tun_inbound::TunInbound>,
+    String,
+    Option<std::sync::Arc<sniffing::SniffingRequest>>,
+    CancellationToken,
+);
+
+/// One WireGuard inbound endpoint: the listen-bound entry, tag, sniffing
+/// request and per-tag cancellation token.
+type WireguardListenerEntry = (
+    crate::runtime::wireguard_inbound::WireguardInbound,
+    String,
+    Option<std::sync::Arc<sniffing::SniffingRequest>>,
+    CancellationToken,
+);
+
 /// One bound hysteria QUIC listener: the endpoint, the compiled inbound,
 /// its tag, sniffing request and per-tag cancellation token.
 type HysteriaListenerEntry = (
@@ -1168,6 +1296,8 @@ async fn dispatch_common(
                     Inbound::Shadowsocks2022 { .. } => "shadowsocks-2022",
                     Inbound::Dns(_) => "dns",
                     Inbound::Hysteria { .. } => "hysteria",
+                    Inbound::Tun { .. } => "tun",
+                    Inbound::Wireguard { .. } => "wireguard",
                 };
                 let admission = timeout(
                     DIAL_TIMEOUT,
@@ -1427,6 +1557,14 @@ async fn proxy_handshake(
         Inbound::Hysteria { .. } => {
             unreachable!("the hysteria inbound dispatches through its QUIC seam")
         }
+        // TUN sessions dispatch through the device seam.
+        Inbound::Tun { .. } => {
+            unreachable!("the tun inbound dispatches through its device seam")
+        }
+        // WireGuard peer sessions dispatch through the engine's netstack seam.
+        Inbound::Wireguard { .. } => {
+            unreachable!("the wireguard inbound dispatches through its engine seam")
+        }
         Inbound::Vmess(authenticator) => {
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
             return Ok((stream, InboundHandshake::Connect(request, None)));
@@ -1636,6 +1774,12 @@ async fn establish(
     } else {
         transport.connect(remote).await?
     };
+    // The `tcpSettings.header` obfuscation wraps the dialed stream before
+    // the first proxy write (Go's tcp dialer builds the authenticator around
+    // the connection right after the transport dial).
+    if let Some(codec) = &transport.tcp_header {
+        stream = crate::transport::headers::dial_side(codec.clone(), stream).await?;
+    }
     stream = CountedStream::wrap(stream, counters, false);
     match outbound {
         Outbound::Vmess {

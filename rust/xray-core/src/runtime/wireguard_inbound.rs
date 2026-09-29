@@ -162,7 +162,9 @@ impl WireguardInbound {
     /// `private_default` select them in protocol/freedom.rs, mirroring
     /// freedom.go:167).
     fn dispatch_inbound(&self) -> Inbound {
-        Inbound::Hysteria { users: Vec::new() }
+        Inbound::Wireguard {
+            entry: self.clone(),
+        }
     }
 
     /// Go's `GetUserByAddr`: the first user whose allowed IPs contain the
@@ -200,6 +202,7 @@ fn user_by_addr(peers: &[PeerConfig], address: IpAddr) -> Option<PeerUser> {
 /// endpoint, terminate peer sessions through the netstack, and dispatch
 /// every TCP session / UDP flow through the runtime dispatcher until the
 /// cancellation token fires. Must return promptly on cancel.
+#[allow(private_interfaces)] // the Dispatcher type stays runtime-private
 pub async fn serve(
     entry: WireguardInbound,
     dispatcher: Arc<Dispatcher>,

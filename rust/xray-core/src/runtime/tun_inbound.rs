@@ -173,7 +173,20 @@ pub fn compile_inbound(settings: &serde_json::Value) -> anyhow::Result<TunInboun
         .validate()
         .map_err(anyhow::Error::from)
         .context("tun inbound settings")?;
-    let inbound = dispatch_inbound(&config);
+    // The dispatch identity: the real Tun variant carrying this very entry
+    // (an Arc, so the identity and the entry share one object; the inner
+    // placeholder is never read — dispatch only matches the outer variant).
+    let identity = std::sync::Arc::new(TunInbound {
+        config: config.clone(),
+        user_level,
+        inbound: Inbound::Dokodemo {
+            destination: Destination::from(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1)),
+            udp: true,
+        },
+    });
+    let inbound = Inbound::Tun {
+        entry: std::sync::Arc::clone(&identity),
+    };
     Ok(TunInbound {
         config,
         user_level,
@@ -199,17 +212,6 @@ fn available_tun_name() -> Result<String> {
 /// private-IP default-block list). When the integrator adds
 /// `Inbound::Tun { entry: TunInbound }` plus the `"tun"` arm in runtime.rs's
 /// freedom-origin match, replace this body with the real variant — one line.
-fn dispatch_inbound(config: &TunConfig) -> Inbound {
-    let address = config
-        .gateway
-        .first()
-        .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |prefix| prefix.address());
-    Inbound::Dokodemo {
-        destination: Destination::from(SocketAddr::new(address, 1)),
-        udp: true,
-    }
-}
-
 /// Serve the TUN inbound on its own task: create the device, run the
 /// netstack, dispatch every TCP session and UDP flow through the runtime
 /// dispatcher until the cancellation token fires. Must return promptly on

@@ -386,7 +386,11 @@ fn receiver_settings(raw: &InboundConfig) -> ReceiverConfig {
                 })
                 .collect(),
         }),
-        listen: Some(ip_or_domain(raw.listen)),
+        listen: Some(ip_or_domain(
+            raw.listen
+                .ip()
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        )),
         ..Default::default()
     }
 }
@@ -506,8 +510,61 @@ impl HandlerStore for StoreHandle {
         let (inbound, transport) = crate::config::compile_inbound(&raw).map_err(error)?;
         let cancel = self.cancel.child_token();
         let tag: Arc<str> = Arc::from(raw.tag.as_str());
+        // A path listen binds a unix domain socket (dokodemo only).
+        if let Some(path) = raw.listen.path() {
+            let address =
+                crate::transport::unix_listener::UnixListenAddress::parse(path).map_err(error)?;
+            let listener = crate::transport::unix_listener::UnixListener::bind(&address)
+                .await
+                .map_err(error)?;
+            tokio::spawn(super::accept_loop(
+                crate::transport::InboundListener::Unix(listener),
+                inbound.clone(),
+                raw.tag.clone(),
+                crate::transport::InboundTransport::default(),
+                sniff.clone(),
+                self.dispatcher.clone(),
+                cancel.clone(),
+            ));
+        }
+        // TUN owns a device, not a socket: one serve task, no port loop.
+        if let crate::config::Inbound::Tun { entry } = &inbound {
+            let serve = super::tun_inbound::serve(
+                (**entry).clone(),
+                self.dispatcher.clone(),
+                tag.clone(),
+                sniff.clone(),
+                cancel.clone(),
+            );
+            tokio::spawn(async move {
+                if let Err(ended) = serve.await {
+                    tracing::warn!(%ended, "tun listener ended");
+                }
+            });
+        }
+        // WireGuard owns one UDP endpoint per port.
+        if let crate::config::Inbound::Wireguard { entry } = &inbound {
+            for port in raw.port.ports() {
+                let bound = entry.clone().listen_on(std::net::SocketAddr::new(
+                    raw.listen.ip().map_err(error)?,
+                    *port,
+                ));
+                let serve = super::wireguard_inbound::serve(
+                    bound,
+                    self.dispatcher.clone(),
+                    tag.clone(),
+                    sniff.clone(),
+                    cancel.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(ended) = serve.await {
+                        tracing::warn!(%ended, "wireguard listener ended");
+                    }
+                });
+            }
+        }
         for port in raw.port.ports() {
-            let address = std::net::SocketAddr::new(raw.listen, *port);
+            let address = std::net::SocketAddr::new(raw.listen.ip().map_err(error)?, *port);
             if let crate::config::Inbound::Hysteria { users } = &inbound {
                 let listener =
                     super::hysteria_seam::bind_inbound(&raw, users, *port).map_err(error)?;
@@ -542,7 +599,7 @@ impl HandlerStore for StoreHandle {
             crate::config::Inbound::Shadowsocks { account, udp: true } => {
                 for port in raw.port.ports() {
                     let bound = super::plain_udp::LegacyShadowsocksUdp::bind(
-                        std::net::SocketAddr::new(raw.listen, *port),
+                        std::net::SocketAddr::new(raw.listen.ip().map_err(error)?, *port),
                         account,
                     )
                     .map_err(error)?;
@@ -563,7 +620,7 @@ impl HandlerStore for StoreHandle {
                     let tag = tag.clone();
                     let destination = destination.clone();
                     let stop = cancel.clone();
-                    let address = std::net::SocketAddr::new(raw.listen, *port);
+                    let address = std::net::SocketAddr::new(raw.listen.ip().map_err(error)?, *port);
                     tokio::spawn(async move {
                         let _ = super::plain_udp::serve_dokodemo_udp(
                             address,
@@ -579,7 +636,7 @@ impl HandlerStore for StoreHandle {
             crate::config::Inbound::Shadowsocks2022 { account, udp: true } => {
                 for port in raw.port.ports() {
                     let bound = super::ss2022_udp_runtime::Ss2022UdpListener::bind(
-                        std::net::SocketAddr::new(raw.listen, *port),
+                        std::net::SocketAddr::new(raw.listen.ip().map_err(error)?, *port),
                         account,
                     )
                     .map_err(error)?;

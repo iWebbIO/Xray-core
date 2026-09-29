@@ -40,6 +40,7 @@ pub(crate) enum AcceptedTransport {
 pub(crate) enum InboundListener {
     Tcp(tokio::net::TcpListener),
     Kcp(kcp::KcpListener),
+    Unix(unix_listener::UnixListener),
 }
 
 impl InboundListener {
@@ -47,6 +48,12 @@ impl InboundListener {
         match self {
             Self::Tcp(listener) => listener.local_addr(),
             Self::Kcp(listener) => Ok(listener.local_addr()),
+            // Go's UnixConnWrapper masks both peers as 0.0.0.0 addresses;
+            // the socket path itself is not a SocketAddr.
+            Self::Unix(_) => Ok(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                0,
+            )),
         }
     }
 
@@ -65,6 +72,16 @@ impl InboundListener {
                 let bound = stream.local_addr();
                 Ok((Box::new(stream), source, bound))
             }
+            Self::Unix(listener) => {
+                // Go's UnixConnWrapper masks the unix peer as 0.0.0.0:0; the
+                // dokodemo handler forwards it as an ordinary TCP stream.
+                let (stream, _peer, _bound) = listener.accept().await?;
+                let masked = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    0,
+                );
+                Ok((stream, masked, masked))
+            }
         }
     }
 
@@ -72,6 +89,7 @@ impl InboundListener {
         match self {
             Self::Tcp(_) => Ok(()),
             Self::Kcp(listener) => listener.close().await,
+            Self::Unix(listener) => listener.close(),
         }
     }
 }
@@ -79,6 +97,9 @@ impl InboundListener {
 #[derive(Clone, Default)]
 pub(crate) struct InboundTransport {
     pub tls: Option<tls::TlsServer>,
+    /// The `tcpSettings.header` obfuscation (Go's tcp.Config header
+    /// authenticator): applied inside the accept, after TLS.
+    pub tcp_header: Option<headers::HeaderCodec>,
     /// REALITY replaces the TLS accept: the handshake authenticates the
     /// client against `realitySettings` and decrypts the application stream.
     pub reality: Option<reality_inbound::InboundConfig>,
@@ -133,6 +154,12 @@ impl InboundTransport {
             })
             .await??;
         }
+        if let Some(codec) = &self.tcp_header {
+            // Go's tcp hub wraps the (TLS-wrapped) connection in the header
+            // authenticator before the proxy handshake: a mismatch is a
+            // camouflage answer followed by a drop.
+            stream = headers::accept_side(codec.clone(), stream).await?;
+        }
         if let Some(config) = &self.grpc {
             return Ok(AcceptedTransport::Grpc(
                 tokio::time::timeout(
@@ -167,6 +194,9 @@ impl InboundTransport {
 pub struct OutboundTransport {
     pub tls: Option<tls::TlsClient>,
     pub reality: Option<reality::handshake::ClientConfig>,
+    /// The `tcpSettings.header` obfuscation: applied on the dial side after
+    /// the transport connect (Go's tcp dialer wraps before the first write).
+    pub tcp_header: Option<headers::HeaderCodec>,
     pub server_name: String,
     /// MASQUE transport settings; the transport opens one HTTP/2
     /// extended-CONNECT tunnel per dialed stream.
@@ -274,6 +304,31 @@ impl OutboundTransport {
             stream = client.open().await?.boxed();
         }
         if let Some(config) = &self.websocket {
+            // Go's websocket dialer routes through the browser dialer when
+            // armed (XRAY_BROWSER_DIALER): the browser performs the TCP+WS
+            // dial and relays the established data channel. Early data (the
+            // `ed` subprotocol) is not carried through the browser path —
+            // documented in PARITY_AUDIT.
+            if crate::transport::browser_dialer::has_browser() {
+                let protocol = if self.tls.is_some() { "wss" } else { "ws" };
+                let host = if !config.host.is_empty() {
+                    config.host.clone()
+                } else if !self.server_name.is_empty() {
+                    self.server_name.clone()
+                } else {
+                    destination.address.to_string()
+                };
+                let host = match destination.port {
+                    80 if protocol == "ws" => host,
+                    443 if protocol == "wss" => host,
+                    _ => format!("{host}:{}", destination.port),
+                };
+                let uri = format!("{protocol}://{host}{}", config.normalized_path());
+                return Ok((
+                    crate::transport::browser_dialer::dial(&uri).await?,
+                    std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+                ));
+            }
             stream = websocket::client(
                 stream,
                 &destination.address.to_string(),

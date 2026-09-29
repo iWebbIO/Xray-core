@@ -286,7 +286,7 @@ pub(super) fn bind_inbound(
         congestion: crate::config::congestion_or_reject(&quic)?,
         quic,
     };
-    let address = SocketAddr::new(raw.listen, port);
+    let address = SocketAddr::new(raw.listen.ip()?, port);
     HysteriaEndpointListener::bind(address, (*server_tls).clone(), options)
         .with_context(|| format!("bind the hysteria QUIC listener on {address}"))
 }

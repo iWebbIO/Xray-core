@@ -225,6 +225,7 @@ fn header_map(
 
 /// One compiled codec pair: the accept-side and the dial-side of the
 /// obfuscation over one stream.
+#[derive(Clone, Debug)]
 pub struct HeaderCodec {
     kind: HeaderKind,
     request: RequestSpec,
