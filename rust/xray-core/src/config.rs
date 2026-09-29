@@ -323,6 +323,7 @@ pub struct StreamSettings {
     pub finalmask: Option<Value>,
     #[serde(alias = "rawSettings")]
     pub tcp_settings: Option<Value>,
+    pub xdrive_settings: Option<Value>,
 }
 
 impl StreamSettings {
@@ -342,6 +343,7 @@ impl StreamSettings {
                     | "mkcp"
                     | "masque"
                     | "hysteria"
+                    | "xdrive"
             ),
             "transport {:?} is not migrated yet",
             self.network
@@ -375,6 +377,23 @@ impl StreamSettings {
             self.masque_settings.is_none() || self.network == "masque",
             "masqueSettings requires the masque transport"
         );
+        ensure!(
+            self.xdrive_settings.is_none() || self.network == "xdrive",
+            "xdriveSettings requires the xdrive transport"
+        );
+        if self.network == "xdrive" {
+            ensure!(
+                matches!(self.security.as_str(), "" | "none"),
+                "the xdrive transport requires security none;                  no TLS layer rides the object store"
+            );
+            let settings = self
+                .xdrive_settings
+                .as_ref()
+                .context("the xdrive transport requires xdriveSettings")?;
+            let parsed = crate::transport::xdrive::stream::XdriveSettings::from_value(settings)
+                .context("xdriveSettings")?;
+            parsed.validate().context("xdriveSettings")?;
+        }
         if let Some(settings) = &self.tcp_settings {
             ensure!(
                 matches!(self.network.as_str(), "" | "tcp" | "raw"),
@@ -419,6 +438,20 @@ impl StreamSettings {
             "the masque transport requires \"security\": \"tls\""
         );
         Ok(())
+    }
+
+    /// The parsed `xdriveSettings` (None when absent); validated like Go's
+    /// XDriveConfig.Build. The async storage compile runs at bind/dial time.
+    pub(crate) fn xdrive_settings(
+        &self,
+    ) -> Result<Option<crate::transport::xdrive::stream::XdriveSettings>> {
+        let Some(value) = &self.xdrive_settings else {
+            return Ok(None);
+        };
+        let settings = crate::transport::xdrive::stream::XdriveSettings::from_value(value)
+            .context("xdriveSettings")?;
+        settings.validate().context("xdriveSettings")?;
+        Ok(Some(settings))
     }
 
     /// The compiled `tcpSettings.header` codec (None when tcpSettings or
@@ -523,6 +556,7 @@ impl StreamSettings {
                 .map(crate::transport::tls::TlsServer::new)
                 .transpose()?,
             tcp_header: self.tcp_header()?,
+            xdrive: self.xdrive_settings()?,
             reality,
             xhttp: xhttp.map(crate::transport::xhttp::Server::new),
             websocket: self.websocket()?,
@@ -562,6 +596,7 @@ impl StreamSettings {
                 .map(crate::transport::tls::TlsClient::new)
                 .transpose()?,
             tcp_header: self.tcp_header()?,
+            xdrive: self.xdrive_settings()?,
             server_name: tls
                 .as_ref()
                 .map(|settings| settings.server_name.clone())

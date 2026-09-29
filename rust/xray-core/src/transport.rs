@@ -41,6 +41,7 @@ pub(crate) enum InboundListener {
     Tcp(tokio::net::TcpListener),
     Kcp(kcp::KcpListener),
     Unix(unix_listener::UnixListener),
+    Xdrive(xdrive::stream::XdriveListener),
 }
 
 impl InboundListener {
@@ -54,6 +55,7 @@ impl InboundListener {
                 std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 0,
             )),
+            Self::Xdrive(listener) => Ok(listener.local_addr()),
         }
     }
 
@@ -82,6 +84,12 @@ impl InboundListener {
                 );
                 Ok((stream, masked, masked))
             }
+            Self::Xdrive(listener) => {
+                // The object store is the channel; the endpoint address is
+                // the engine's placeholder (Go's placeholderAddr).
+                let (stream, source) = listener.accept().await?;
+                Ok((stream, source, xdrive::stream::PLACEHOLDER_ADDR))
+            }
         }
     }
 
@@ -90,6 +98,7 @@ impl InboundListener {
             Self::Tcp(_) => Ok(()),
             Self::Kcp(listener) => listener.close().await,
             Self::Unix(listener) => listener.close(),
+            Self::Xdrive(listener) => listener.close().await,
         }
     }
 }
@@ -100,6 +109,9 @@ pub(crate) struct InboundTransport {
     /// The `tcpSettings.header` obfuscation (Go's tcp.Config header
     /// authenticator): applied inside the accept, after TLS.
     pub tcp_header: Option<headers::HeaderCodec>,
+    /// The `xdriveSettings` object: compiled into the object-store
+    /// listener at bind time (the storage constructors are async).
+    pub xdrive: Option<xdrive::stream::XdriveSettings>,
     /// REALITY replaces the TLS accept: the handshake authenticates the
     /// client against `realitySettings` and decrypts the application stream.
     pub reality: Option<reality_inbound::InboundConfig>,
@@ -112,6 +124,17 @@ pub(crate) struct InboundTransport {
 
 impl InboundTransport {
     pub async fn bind(&self, address: std::net::SocketAddr) -> io::Result<InboundListener> {
+        if let Some(settings) = &self.xdrive {
+            // The object store is the channel; the address is advisory
+            // (Go's Serve ignores it the same way).
+            let end = xdrive::stream::XdriveStream::compile(settings)
+                .await
+                .map_err(io::Error::other)?;
+            let listener = xdrive::stream::serve(&end, address)
+                .await
+                .map_err(io::Error::other)?;
+            return Ok(InboundListener::Xdrive(listener));
+        }
         match &self.kcp {
             Some(config) => Ok(InboundListener::Kcp(
                 kcp::KcpListener::bind(address, config.clone(), kcp::StreamOptions::default())
@@ -197,6 +220,8 @@ pub struct OutboundTransport {
     /// The `tcpSettings.header` obfuscation: applied on the dial side after
     /// the transport connect (Go's tcp dialer wraps before the first write).
     pub tcp_header: Option<headers::HeaderCodec>,
+    /// The `xdriveSettings` object: compiled and dialed per connect.
+    pub xdrive: Option<xdrive::stream::XdriveSettings>,
     pub server_name: String,
     /// MASQUE transport settings; the transport opens one HTTP/2
     /// extended-CONNECT tunnel per dialed stream.
@@ -222,6 +247,10 @@ impl OutboundTransport {
         destination: &crate::address::Destination,
         resolved: Option<&[std::net::SocketAddr]>,
     ) -> anyhow::Result<(BoxStream, std::net::SocketAddr)> {
+        if let Some(settings) = &self.xdrive {
+            let end = xdrive::stream::XdriveStream::compile(settings).await?;
+            return xdrive::stream::dial(&end, destination).await;
+        }
         if let Some(settings) = &self.masque {
             return self.connect_masque(settings, destination, resolved).await;
         }
