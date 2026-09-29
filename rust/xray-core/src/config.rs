@@ -76,7 +76,12 @@ impl ApiConfig {
             ensure!(
                 matches!(
                     service.as_str(),
-                    "statsservice" | "loggerservice" | "observatoryservice" | "handlerservice"
+                    "statsservice"
+                        | "loggerservice"
+                        | "observatoryservice"
+                        | "handlerservice"
+                        | "routingservice"
+                        | "reflectionservice"
                 ),
                 "API service {service:?} is not integrated yet"
             );
@@ -310,6 +315,8 @@ pub struct StreamSettings {
     pub grpc_settings: Option<Value>,
     pub kcp_settings: Option<Value>,
     pub masque_settings: Option<Value>,
+    pub hysteria_settings: Option<Value>,
+    pub finalmask: Option<Value>,
 }
 
 impl StreamSettings {
@@ -328,6 +335,7 @@ impl StreamSettings {
                     | "kcp"
                     | "mkcp"
                     | "masque"
+                    | "hysteria"
             ),
             "transport {:?} is not migrated yet",
             self.network
@@ -362,6 +370,24 @@ impl StreamSettings {
             "masqueSettings requires the masque transport"
         );
         ensure!(
+            self.hysteria_settings.is_none() || self.network == "hysteria",
+            "hysteriaSettings requires the hysteria transport"
+        );
+        ensure!(
+            self.network != "hysteria" || self.hysteria_settings.is_some(),
+            "the hysteria transport requires hysteriaSettings"
+        );
+        ensure!(
+            self.network != "hysteria" || self.security == "tls",
+            "the hysteria transport requires \"security\": \"tls\""
+        );
+        if let Some(finalmask) = &self.finalmask {
+            crate::transport::finalmask::FinalMaskSettings::from_value(finalmask)
+                .context("finalmask")?
+                .validate()
+                .context("finalmask")?;
+        }
+        ensure!(
             !matches!(self.network.as_str(), "kcp" | "mkcp") || self.security != "reality",
             "KCP does not support REALITY security"
         );
@@ -370,6 +396,18 @@ impl StreamSettings {
             "the masque transport requires \"security\": \"tls\""
         );
         Ok(())
+    }
+
+    /// The compiled `finalmask.quicParams` (Go's nil defaults when absent);
+    /// validated like Go's StreamConfig.Build.
+    pub(crate) fn quic_params(&self) -> Result<crate::transport::finalmask::QuicParams> {
+        match &self.finalmask {
+            Some(value) => crate::transport::finalmask::FinalMaskSettings::from_value(value)
+                .context("finalmask")?
+                .compile()
+                .context("finalmask"),
+            None => Ok(crate::transport::finalmask::QuicParams::default()),
+        }
     }
 
     fn layers(
@@ -652,6 +690,12 @@ pub enum Inbound {
     /// The DNS proxy inbound: a terminal handler answering DNS queries (and
     /// optionally forwarding non-DNS streams).
     Dns(crate::protocol::dns_proxy::DnsProxySettings),
+    /// The hysteria inbound's proxy settings (version-2 users); the QUIC
+    /// listener pieces (TLS, hysteriaSettings, quicParams) compile from the
+    /// stream settings in the runtime.
+    Hysteria {
+        users: Vec<crate::protocol::hysteria_runtime::HysteriaUser>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -713,6 +757,11 @@ pub enum Outbound {
     Loopback {
         settings: crate::protocol::loopback::LoopbackSettings,
     },
+    Hysteria {
+        /// The assembled dialer: server destination, TLS client config,
+        /// hysteriaSettings auth, and the quicParams congestion/tuning.
+        dialer: std::sync::Arc<crate::transport::hysteria_endpoint::HysteriaClientDialer>,
+    },
 }
 
 pub(crate) struct ValidatedConfig {
@@ -765,6 +814,29 @@ pub struct PortSpec(Vec<u16>);
 impl PortSpec {
     pub fn ports(&self) -> &[u16] {
         &self.0
+    }
+
+    /// Parse the Go port forms: a number, "3000", or "3000-4000" (the
+    /// RoutingService and the CLI feed these strings).
+    pub fn from_spec(spec: &str) -> Result<Self> {
+        let ports = match spec.split_once('-') {
+            None => vec![
+                spec.parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("invalid port {spec:?}"))?,
+            ],
+            Some((start, end)) => {
+                let (start, end) = (
+                    start
+                        .parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("invalid port {spec:?}"))?,
+                    end.parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("invalid port {spec:?}"))?,
+                );
+                anyhow::ensure!(start <= end, "invalid port range {spec:?}");
+                (start..=end).collect()
+            }
+        };
+        Ok(Self(ports))
     }
 
     /// A single-port spec (test/programmatic construction).
@@ -1008,6 +1080,60 @@ impl Config {
                         .context("WireGuard outbound settings")?;
                     Outbound::Wireguard { settings }
                 }
+                "hysteria" => {
+                    let settings =
+                        crate::protocol::hysteria_runtime::HysteriaOutboundSettings::from_value(
+                            &raw.settings,
+                        )
+                        .context("hysteria outbound settings")?;
+                    settings
+                        .validate()
+                        .context("hysteria outbound settings")?;
+                    ensure!(
+                        raw.stream_settings.network == "hysteria",
+                        "the hysteria outbound requires streamSettings.network \"hysteria\""
+                    );
+                    let transport_settings =
+                        crate::transport::hysteria_endpoint::HysteriaTransportSettings::from_value(
+                            raw.stream_settings
+                                .hysteria_settings
+                                .as_ref()
+                                .context("the hysteria outbound requires hysteriaSettings")?,
+                        )
+                        .context("hysteriaSettings")?;
+                    transport_settings
+                        .validate()
+                        .context("hysteriaSettings")?;
+                    let tls = stream_tls_settings(&raw.stream_settings)?;
+                    let server = settings.server()?;
+                    // The QUIC server name falls back to the dialed host like
+                    // Go's TLSConfig (ServerName empty means the address).
+                    let server_name = if tls.server_name.is_empty() {
+                        match &server.address {
+                            crate::address::Address::Domain(host) => host.clone(),
+                            crate::address::Address::Ip(ip) => ip.to_string(),
+                        }
+                    } else {
+                        tls.server_name.clone()
+                    };
+                    let client_tls = tls
+                        .build_client_config()
+                        .context("hysteria outbound tlsSettings")?;
+                    let quic = raw.stream_settings.quic_params()?;
+                    let congestion = congestion_or_reject(&quic)?;
+                    let dialer = crate::protocol::hysteria_runtime::client_dialer(
+                        &server,
+                        &server_name,
+                        (*client_tls).clone(),
+                        &transport_settings.auth,
+                        quic.brutal_down_bps,
+                        congestion,
+                    )
+                    .with_quic_params(quic);
+                    Outbound::Hysteria {
+                        dialer: std::sync::Arc::new(dialer),
+                    }
+                }
                 other => bail!("outbound protocol {other:?} is not migrated yet"),
             });
         }
@@ -1112,6 +1238,40 @@ impl Config {
 /// Compile one inbound: parse its transport settings and protocol accounts.
 /// Shared by `Config::compile` and the HandlerService runtime registry, which
 /// validates dynamically added inbounds through the same rules.
+/// The TLS settings a QUIC transport (hysteria, masque) dials or binds with:
+/// validated and compiled once here so a certificate problem fails at config
+/// parse, exactly where Go's transport constructor fails.
+fn stream_tls_settings(stream: &StreamSettings) -> Result<crate::transport::tls::TlsSettings> {
+    ensure!(
+        stream.security == "tls",
+        "the transport requires \"security\": \"tls\""
+    );
+    let settings: crate::transport::tls::TlsSettings =
+        serde_json::from_value(stream.tls_settings.clone().unwrap_or_else(empty_object))
+            .context("tlsSettings")?;
+    Ok(settings)
+}
+
+/// The quicParams congestion selection: reno compiles to Quinn's NewReno;
+/// the pinned BBR profiles and Brutal are named rejections (never a silent
+/// downgrade). The peer's advertised receive bandwidth arrives per
+/// connection at runtime, so the negotiation runs over the configured
+/// up/down pair.
+pub(crate) fn congestion_or_reject(
+    quic: &crate::transport::finalmask::QuicParams,
+) -> Result<crate::transport::hysteria::NativeCongestion> {
+    let mode = crate::transport::hysteria::CongestionMode::from_name(&quic.congestion)?;
+    let profile = crate::transport::hysteria::BbrProfile::from_name(&quic.bbr_profile)?;
+    crate::transport::hysteria::negotiate_congestion(
+        mode,
+        profile,
+        quic.brutal_up_bps,
+        quic.brutal_down_bps,
+        quic.brutal_disable_loss_compensation,
+    )
+    .supported_native_controller()
+}
+
 pub(crate) fn compile_inbound(
     raw: &InboundConfig,
 ) -> Result<(Inbound, crate::transport::InboundTransport)> {
@@ -1197,6 +1357,51 @@ pub(crate) fn compile_inbound(
         }
         "vless" | "trojan" | "shadowsocks" => proxies::inbound(&raw.protocol, &raw.settings)?,
         "vmess" => vmess::inbound(&raw.settings)?,
+        "hysteria" => {
+            let settings = crate::protocol::hysteria_runtime::HysteriaInboundSettings::from_value(
+                &raw.settings,
+            )
+            .context("hysteria inbound settings")?;
+            settings.validate().context("hysteria inbound settings")?;
+            // The transport pieces the QUIC listener compiles from the stream
+            // settings fail here, at parse time, like Go's proxy constructor
+            // ("not hysteria transport") and hub.Listen.
+            ensure!(
+                raw.stream_settings.network == "hysteria",
+                "the hysteria inbound requires streamSettings.network \"hysteria\""
+            );
+            let transport_settings =
+                crate::transport::hysteria_endpoint::HysteriaTransportSettings::from_value(
+                    raw.stream_settings
+                        .hysteria_settings
+                        .as_ref()
+                        .context("the hysteria inbound requires hysteriaSettings")?,
+                )
+                .context("hysteriaSettings")?;
+            transport_settings.validate().context("hysteriaSettings")?;
+            // The rustls server config must compile before startup (the
+            // runtime rebuilds it from the same settings when it binds).
+            let server_tls = stream_tls_settings(&raw.stream_settings)?;
+            let _ = server_tls.build_server_config()?;
+            let quic = raw.stream_settings.quic_params()?;
+            // The transport auth secret or the proxy users must authenticate
+            // someone (Go's hub validator-or-auth check), and the masquerade
+            // plus congestion compile exactly as hub.Listen would.
+            crate::transport::hysteria_endpoint::HysteriaServerOptions {
+                users: settings.effective_users().to_vec(),
+                auth: transport_settings.auth.clone(),
+                masquerade: transport_settings.masquerade.compile()?,
+                udp_idle_timeout: transport_settings.udp_idle_timeout(),
+                receive_bytes_per_second: quic.brutal_down_bps,
+                congestion: congestion_or_reject(&quic)?,
+                quic: quic.clone(),
+            }
+            .validate()
+            .context("hysteria inbound settings")?;
+            Inbound::Hysteria {
+                users: settings.effective_users().to_vec(),
+            }
+        }
         "dns" => {
             let settings = crate::protocol::dns_proxy::DnsProxySettings::from_value(&raw.settings)
                 .context("dns inbound settings")?;

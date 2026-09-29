@@ -206,10 +206,50 @@ all five env-gated Go fixtures green):
 - The dns inbound/outbound (hijack + rewrite-forward) and the loopback
   outbound; user policy levels end to end (accounts → handshakes →
   PolicyManager.ForLevel); the root env/version/geodata/metrics keys.
+- RoutingService (TestRoute, balancer info/override, Add/Remove/List rule
+  with hot router recompile+swap), gRPC reflection, the CLI lsrules/rmrules/
+  adrules and `convert json`.
+- Hysteria end to end: config arms, per-port QUIC listeners, the dispatch
+  seam (TCP through the shared dispatch, UDP through the routing
+  dispatcher with XUDP), the shared-session outbound pool; verified by two
+  full-runtime tests plus the engine suite.
 
 Explicitly-rejected surfaces (fail with named errors, never silently):
 nested Mux.Cool carriers; bittorrent/UTP and fakedns sniffing; HTTP/3
 (QUIC) DNS; the geodata download scheduler; the metrics pprof app;
-HandlerService runtime mutations; the convert CLI; hysteria and TUN
-runtimes; TLS fingerprint impersonation (uTLS); routed encrypted DNS
-without bootstrap pins; xudpProxyUDP443=skip.
+HandlerService runtime mutations; the TUN runtime; `convert pb`; the
+pinned Hysteria BBR profiles and Brutal congestion (configs must select
+`reno`); finalmask mask chains (codecs ported, socket install pending);
+TLS fingerprint impersonation (uTLS); routed encrypted DNS without
+bootstrap pins; xudpProxyUDP443=skip. Known quinn deviations from Go's
+hysteria defaults (documented, not configurable): no stateless resets,
+no Chrome-QUIC fingerprint parroting.
+
+## Checkpoint — September 29, 2026, routing API + reflection + convert + hysteria
+
+One batch landing the RoutingService/reflection/convert trio and the full
+hysteria runtime wiring. All gates green (fmt/clippy -D warnings clean;
+workspace tests **1175/0/5**; Go interop 34/34 + 6/6 + 8/8 with the absolute
+XRAY_GO_BINARY path; all five env-gated Go fixtures):
+
+- `RouterHandle` (RwLock-swappable compiled router) on the Dispatcher; the
+  `RuntimeRoutingStore` recompiles+swaps on every AddRule/RemoveRule and
+  serves TestRoute/balancer info/balancer override; RoutingService itself
+  runs over it (SubscribeRoutingStats is a named unimplemented).
+- gRPC server reflection (ReflectionService over the descriptor set).
+- CLI `lsrules`/`rmrules`/`adrules` (Go config-JSON rule spellings) and
+  `xray convert json` (prost-reflect TypedMessage → JSON; `convert pb`
+  stays a named rejection).
+- Hysteria: config arms both sides (`hysteriaSettings`,
+  `finalmask.quicParams` with Go's exact validation and Bandwidth
+  parsing), per-port QUIC listeners via `bind_inbound`, the
+  `RuntimeSeam` (TCP through `dispatch_request`, UDP through the UDP
+  routing dispatcher with relay peers and XUDP pumps), and the outbound
+  `HysteriaPool` (one shared authenticated QUIC session per outbound,
+  `open_stream` through `establish`). Engine suite 5/5 plus the two
+  full-runtime tests (client dialer → seam → freedom; SOCKS → hysteria
+  outbound → second runtime → freedom).
+- Named rejections added this batch: pinned BBR profiles/Brutal (the
+  Go default congestion needs `reno`), quicParams debug/disableGSO/
+  disableStatelessReset, finalmask mask chains; documented quinn
+  deviations: no stateless resets, no Chrome fingerprint parroting.

@@ -429,3 +429,39 @@ interop **34/6/8** (XRAY_GO_BINARY as an absolute path), all five
 env-gated Go fixtures pass. Explicitly rejected (fail with named gaps,
 never silently): HandlerService mutations, reverse XUDP, 2022-chacha20
 UDP, MASQUE HTTP/3, legacy SS UDP, dokodemo UDP, port ranges, user levels.
+
+## September 29, 2026 — routing API, reflection, convert, hysteria wired (this batch)
+
+- **RoutingService** (xray.app.router.RoutingService): TestRoute,
+  GetBalancerInfo/OverrideBalancerTarget (through the compiled
+  `Balancer::set_override`), AddRule/RemoveRule/ListRule with the
+  `RuntimeRoutingStore` hot-recompiling the router and swapping it inside
+  `RouterHandle` (balancer observations re-attach across swaps);
+  SubscribeRoutingStats is a named unimplemented (the statistics channel
+  does not exist in the port). The CLI gained `lsrules`, `rmrules`,
+  `adrules` with the Go config-JSON spellings for rules.
+- **gRPC server reflection** over the full descriptor set
+  (tonic-reflection), registered as `ReflectionService`.
+- **`xray convert json`**: TypedMessage files decode through
+  prost-reflect into JSON (the `_TypedMessage_` annotation optional);
+  `convert pb` remains a named rejection (the config-to-protobuf encoder
+  is not integrated).
+- **Hysteria end to end**: the `hysteria` inbound/outbound config arms
+  (version-2 users, `hysteriaSettings`, `finalmask.quicParams` with Go's
+  StreamConfig.Build validation and Bandwidth parsing), one QUIC listener
+  per inbound port, the dispatch seam (TCP streams run the shared
+  post-handshake dispatch — routing, sniffing, stats; UDP sessions
+  dispatch each datagram through the UDP routing dispatcher with relay
+  peers and XUDP pumps), and the outbound pool keeping one shared
+  authenticated QUIC session per outbound. Two full-runtime tests relay
+  both directions (client dialer → inbound seam → freedom, and SOCKS →
+  hysteria outbound → second runtime → freedom).
+- Named rejections added: the pinned Hysteria **BBR profiles** (quinn's
+  experimental BBR is a different controller — the config default
+  therefore requires `congestion: "reno"`) and **Brutal**; quicParams
+  `debug`/`disableGSO`/`disableStatelessReset`; `finalmask` tcp/udp mask
+  chains (the mask codecs exist, the socket chain install is not wired);
+  quinn has no stateless resets at all and never parrots Chrome's QUIC
+  fingerprint (Go's defaults differ — documented, not fixable).
+- Gates: fmt/clippy -D warnings clean; workspace tests **1175/0/5**;
+  Go interop **34/34, 6/6, 8/8**; all five env-gated Go fixtures green.

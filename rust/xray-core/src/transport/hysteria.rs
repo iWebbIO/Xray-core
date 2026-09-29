@@ -301,10 +301,16 @@ impl NegotiatedCongestion {
     pub fn supported_native_controller(self) -> Result<NativeCongestion> {
         match self {
             Self::Reno => Ok(NativeCongestion::QuinnNewReno),
-            Self::Bbr(_) => bail!(
-                "pinned Hysteria BBR profiles are not ported; explicitly select QuinnBbr to use Quinn's alternative"
+            Self::Bbr(profile) => bail!(
+                "the pinned Hysteria BBR profile {:?} is not ported (quinn's \
+                 experimental BBR is a different controller); set \
+                 finalmask.quicParams.congestion to \"reno\"",
+                profile
             ),
-            Self::Brutal { .. } => bail!("Hysteria Brutal congestion control is not implemented"),
+            Self::Brutal { .. } => bail!(
+                "Hysteria Brutal congestion control is not implemented; set \
+                 finalmask.quicParams.congestion to \"reno\""
+            ),
         }
     }
 }
@@ -317,6 +323,9 @@ pub struct ClientOptions {
     pub idle_timeout: Duration,
     pub keep_alive: Option<Duration>,
     pub disable_path_mtu_discovery: bool,
+    /// The stream and connection receive windows (Go's dialer defaults).
+    pub windows: (u64, u64),
+    pub max_incoming_streams: i64,
 }
 
 impl ClientOptions {
@@ -328,7 +337,20 @@ impl ClientOptions {
             idle_timeout: Duration::from_secs(30),
             keep_alive: None,
             disable_path_mtu_discovery: false,
+            windows: (8_388_608, 8_388_608 * 5 / 2),
+            max_incoming_streams: 1_024,
         }
+    }
+
+    /// Fold one compiled `finalmask.quicParams` in (Go's dialer reads every
+    /// QUIC knob from it); the handshake timeout stays the transport's own.
+    pub fn with_quic_params(mut self, quic: crate::transport::finalmask::QuicParams) -> Self {
+        self.idle_timeout = quic.max_idle_timeout;
+        self.keep_alive = quic.keep_alive_period;
+        self.disable_path_mtu_discovery = quic.disable_path_mtu_discovery;
+        self.windows = (quic.stream_receive_window, quic.connection_receive_window);
+        self.max_incoming_streams = quic.max_incoming_streams;
+        self
     }
 
     pub fn transport_config(&self) -> Result<quinn::TransportConfig> {
@@ -341,12 +363,19 @@ impl ClientOptions {
             "Hysteria idle timeout must be positive"
         );
         let mut config = quinn::TransportConfig::default();
-        config.stream_receive_window(quinn::VarInt::from_u32(8_388_608));
-        config.receive_window(quinn::VarInt::from_u32(8_388_608 * 5 / 2));
+        config.stream_receive_window(quinn::VarInt::from_u64(
+            self.windows.0.min(u32::MAX as u64),
+        )?);
+        config.receive_window(quinn::VarInt::from_u64(
+            self.windows.1.min(u32::MAX as u64),
+        )?);
         config.max_idle_timeout(Some(self.idle_timeout.try_into()?));
         config.keep_alive_interval(self.keep_alive);
         config.datagram_receive_buffer_size(Some(MAX_DATAGRAM_FRAME_SIZE * 1024));
         config.datagram_send_buffer_size(MAX_DATAGRAM_FRAME_SIZE * 1024);
+        config.max_concurrent_bidi_streams(quinn::VarInt::from_u64(
+            self.max_incoming_streams.clamp(0, i64::from(u32::MAX)) as u64,
+        )?);
         if self.disable_path_mtu_discovery {
             config.mtu_discovery_config(None);
         }

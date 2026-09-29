@@ -13,7 +13,8 @@ use crate::{
     config::{Outbound, StreamSettings},
     features::{StatsManager, policy::SystemStatsPolicy, stats::TrafficCounters},
     protocol::freedom::FinalRules,
-    router::{RouteContext, Router},
+    router::RouteContext,
+    router::RouterHandle,
 };
 
 use super::udp::{DispatchAction, DispatchContext, DispatchFuture, UdpDispatcher};
@@ -127,7 +128,7 @@ impl RouteOutbound {
 }
 
 struct Inner {
-    router: Arc<Router>,
+    router: Arc<RouterHandle>,
     outbounds: Vec<RouteOutbound>,
     inbound_protocol: Arc<str>,
     resolver: Arc<dyn UdpResolver>,
@@ -149,7 +150,7 @@ pub struct RoutingDispatcher {
 
 impl RoutingDispatcher {
     pub fn new(
-        router: Arc<Router>,
+        router: Arc<RouterHandle>,
         outbounds: Vec<RouteOutbound>,
         inbound_protocol: impl Into<Arc<str>>,
         resolver: Arc<dyn UdpResolver>,
@@ -317,7 +318,7 @@ mod tests {
     use super::*;
     use crate::{
         config::OutboundConfig, features::policy::SystemStatsPolicy, protocol::freedom::RuleConfig,
-        router::RoutingConfig,
+        router::Router, router::RoutingConfig,
     };
     use std::sync::{
         Mutex,
@@ -364,7 +365,7 @@ mod tests {
         )
         .unwrap();
         RoutingDispatcher::new(
-            Arc::new(router),
+            Arc::new(RouterHandle::new(Arc::new(router))),
             outbounds
                 .iter()
                 .enumerate()

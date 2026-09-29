@@ -22,6 +22,10 @@ use xray_core::{
     proto::xray::app::log::command::{
         RestartLoggerRequest, logger_service_client::LoggerServiceClient,
     },
+    proto::xray::app::router::command::{
+        AddRuleRequest, ListRuleRequest, RemoveRuleRequest,
+        routing_service_client::RoutingServiceClient,
+    },
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -46,9 +50,39 @@ pub enum ApiCommand {
     /// Reopen the running process's logger outputs.
     #[command(name = "restartlogger")]
     RestartLogger(ConnectionArgs),
+    /// List the running router's rules.
+    #[command(name = "lsrules")]
+    ListRules(ConnectionArgs),
+    /// Remove a routing rule by its tag.
+    #[command(name = "rmrules")]
+    RemoveRules(RemoveRulesArgs),
+    /// Add routing rules from config files (JSON config format).
+    #[command(name = "adrules")]
+    AddRules(AddRulesArgs),
     /// Preserve an explicit unsupported-service diagnostic for other commands.
     #[command(external_subcommand)]
     Unsupported(Vec<String>),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct RemoveRulesArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// The rule tag to remove (repeatable).
+    #[arg(required = true)]
+    pub rule_tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct AddRulesArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// Append after the existing rules instead of prepending.
+    #[arg(long, default_value_t = false)]
+    pub append: bool,
+    /// Config files whose `routing` fields carry the rules (stdin with `-`).
+    #[arg(required = true)]
+    pub configs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -124,13 +158,16 @@ impl ApiCommand {
             Self::StatsOnlineIpList(args) => &args.connection,
             Self::StatsSys(args)
             | Self::StatsGetAllOnlineUsers(args)
-            | Self::RestartLogger(args) => args,
+            | Self::RestartLogger(args)
+            | Self::ListRules(args) => args,
+            Self::RemoveRules(args) => &args.connection,
+            Self::AddRules(args) => &args.connection,
             Self::Unsupported(args) => {
                 let name = args.first().map(String::as_str).unwrap_or("");
                 let service = match name {
                     "adi" | "ado" | "rmi" | "rmo" | "lsi" | "lso" | "adu" | "rmu"
                     | "inbounduser" | "inboundusercount" => "HandlerService",
-                    "bi" | "bo" | "adrules" | "rmrules" | "lsrules" | "sib" => "RoutingService",
+                    "bi" | "bo" | "sib" => "RoutingService",
                     "observatory" | "outboundstatus" => {
                         "ObservatoryService with a real observation provider"
                     }
@@ -173,6 +210,176 @@ pub async fn execute(command: ApiCommand) -> Result<String> {
         .checked_add(Duration::from_secs(args.timeout as u64))
         .context("API timeout exceeds the platform's supported range")?;
     execute_at(command, deadline).await
+}
+
+/// One config-format routing rule (`routing.rules[i]`) → the proto
+/// `RoutingRule` TypedMessage AddRule carries. Domain/ip entries keep the
+/// config spelling; the service's matcher parser handles them on arrival.
+fn rule_to_typed_message(rule: &Value) -> Result<xray_proto::xray::common::serial::TypedMessage> {
+    use xray_proto::xray::app::router::{RoutingRule, routing_rule::TargetTag};
+    use xray_proto::xray::common::geodata::{
+        Cidr, CidrRule, Domain, DomainRule, IpRule, domain_rule::Value as DomainValue,
+        ip_rule::Value as IpValue,
+    };
+
+    let strings = |value: &Value| -> Vec<String> {
+        match value {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect(),
+            Value::String(text) => vec![text.clone()],
+            _ => Vec::new(),
+        }
+    };
+    let domain_entry = |text: &str| -> Option<DomainRule> {
+        // The config spellings: plain, regexp:, domain:, full:, subdomain:,
+        // and ext:file:code references.
+        if let Some(rest) = text.strip_prefix("ext:") {
+            let (file, code) = rest.split_once(':')?;
+            return Some(DomainRule {
+                value: Some(DomainValue::Geosite(
+                    xray_proto::xray::common::geodata::GeoSiteRule {
+                        file: file.to_owned(),
+                        code: code.to_owned(),
+                        attrs: String::new(),
+                    },
+                )),
+            });
+        }
+        let (kind, value) = match text.split_once(':') {
+            Some(("plain", value)) => (0, value),
+            Some(("regexp", value)) => (1, value),
+            Some(("domain", value)) => (2, value),
+            Some(("full", value)) => (3, value),
+            Some(("subdomain", value)) => (2, value),
+            _ => (0, text),
+        };
+        Some(DomainRule {
+            value: Some(DomainValue::Custom(Domain {
+                r#type: kind,
+                value: value.to_owned(),
+                attribute: Vec::new(),
+            })),
+        })
+    };
+    let ip_entry = |text: &str| -> Option<IpRule> {
+        if let Some(rest) = text.strip_prefix("ext:") {
+            let (file, code) = rest.split_once(':')?;
+            return Some(IpRule {
+                value: Some(IpValue::Geoip(
+                    xray_proto::xray::common::geodata::GeoIpRule {
+                        file: file.to_owned(),
+                        code: code.to_owned(),
+                        reverse_match: false,
+                    },
+                )),
+            });
+        }
+        let (address, prefix) = text.split_once('/').unwrap_or((text, "32"));
+        let ip: std::net::IpAddr = address.parse().ok()?;
+        let bytes = match ip {
+            std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+            std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+        };
+        let prefix: u32 = prefix.parse().ok()?;
+        Some(IpRule {
+            value: Some(IpValue::Custom(CidrRule {
+                cidr: Some(Cidr { ip: bytes, prefix }),
+                reverse_match: false,
+            })),
+        })
+    };
+    let port_list = |spec: &str| -> Option<xray_proto::xray::common::net::PortList> {
+        let ranges = spec
+            .split(',')
+            .map(|part| {
+                let (from, to) = match part.split_once('-') {
+                    Some((from, to)) => (from.parse::<u32>().ok()?, to.parse::<u32>().ok()?),
+                    None => {
+                        let port = part.parse::<u32>().ok()?;
+                        (port, port)
+                    }
+                };
+                Some(xray_proto::xray::common::net::PortRange { from, to })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(xray_proto::xray::common::net::PortList { range: ranges })
+    };
+
+    let outbound_tag = rule.get("outboundTag").and_then(|tag| tag.as_str());
+    let balancer_tag = rule.get("balancerTag").and_then(|tag| tag.as_str());
+    let target_tag = match (outbound_tag, balancer_tag) {
+        (Some(tag), _) => Some(TargetTag::Tag(tag.to_owned())),
+        (None, Some(tag)) => Some(TargetTag::BalancingTag(tag.to_owned())),
+        (None, None) => bail!("the routing rule sets neither outboundTag nor balancerTag"),
+    };
+    let networks = strings(rule.get("network").unwrap_or(&Value::Null))
+        .iter()
+        .flat_map(|text| text.split(','))
+        .map(|text| match text.trim() {
+            "udp" => 2,
+            _ => 1,
+        })
+        .collect::<Vec<i32>>();
+    let mut proto_rule = RoutingRule {
+        rule_tag: rule
+            .get("ruleTag")
+            .and_then(|tag| tag.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        domain: rule
+            .get("domain")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().and_then(domain_entry))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ip: rule
+            .get("ip")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().and_then(ip_entry))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        port_list: rule
+            .get("port")
+            .and_then(|value| value.as_str())
+            .and_then(port_list),
+        networks,
+        source_ip: rule
+            .get("sourceIP")
+            .or_else(|| rule.get("sourceIp"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().and_then(ip_entry))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        source_port_list: rule
+            .get("sourcePort")
+            .and_then(|value| value.as_str())
+            .and_then(port_list),
+        user_email: strings(rule.get("user").unwrap_or(&Value::Null)),
+        inbound_tag: strings(rule.get("inboundTag").unwrap_or(&Value::Null)),
+        protocol: strings(rule.get("protocol").unwrap_or(&Value::Null)),
+        ..Default::default()
+    };
+    if let Some(tag) = target_tag {
+        proto_rule.target_tag = Some(tag);
+    }
+    Ok(xray_proto::xray::common::serial::TypedMessage {
+        r#type: "type.googleapis.com/xray.app.router.RoutingRule".to_owned(),
+        value: prost::Message::encode_to_vec(&proto_rule),
+    })
 }
 
 fn endpoint(server: &str) -> Result<Endpoint> {
@@ -360,6 +567,85 @@ async fn execute_at(command: ApiCommand, deadline: Instant) -> Result<String> {
                 client.restart_logger(request(RestartLoggerRequest {}, deadline)?),
             )
             .await?;
+            object(BTreeMap::new())
+        }
+        ApiCommand::ListRules(_) => {
+            let mut client = RoutingServiceClient::new(channel);
+            let response = rpc(
+                deadline,
+                "failed to perform ListRule",
+                client.list_rule(request(ListRuleRequest {}, deadline)?),
+            )
+            .await?;
+            let rules: Vec<Value> = response
+                .into_inner()
+                .rules
+                .into_iter()
+                .map(|rule| {
+                    object(BTreeMap::from([
+                        ("tag".to_owned(), Value::String(rule.tag)),
+                        ("ruleTag".to_owned(), Value::String(rule.rule_tag)),
+                    ]))
+                })
+                .collect();
+            Value::Array(rules)
+        }
+        ApiCommand::RemoveRules(args) => {
+            let mut client = RoutingServiceClient::new(channel);
+            for rule_tag in args.rule_tags {
+                rpc(
+                    deadline,
+                    "failed to perform RemoveRule",
+                    client.remove_rule(request(RemoveRuleRequest { rule_tag }, deadline)?),
+                )
+                .await?;
+            }
+            object(BTreeMap::new())
+        }
+        ApiCommand::AddRules(args) => {
+            let mut client = RoutingServiceClient::new(channel);
+            let mut added = 0usize;
+            for config_path in &args.configs {
+                let raw = if config_path == "-" {
+                    use std::io::Read;
+                    let mut buffer = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buffer)
+                        .context("cannot read the rule configuration from stdin")?;
+                    buffer
+                } else {
+                    std::fs::read_to_string(config_path).with_context(|| {
+                        format!("cannot read the rule configuration {config_path}")
+                    })?
+                };
+                let document: serde_json::Value = serde_json::from_str(&raw)
+                    .with_context(|| format!("invalid rule configuration {config_path}"))?;
+                let routing = document
+                    .get("routing")
+                    .context("failed to add routing rule: config did not have \"routing\" field")?;
+                let rules = routing
+                    .get("rules")
+                    .and_then(|rules| rules.as_array())
+                    .context("the routing field carries no rules")?;
+                for rule in rules {
+                    let typed = rule_to_typed_message(rule)
+                        .with_context(|| format!("invalid rule in {config_path}"))?;
+                    rpc(
+                        deadline,
+                        "failed to perform AddRule",
+                        client.add_rule(request(
+                            AddRuleRequest {
+                                config: Some(typed),
+                                should_append: args.append,
+                            },
+                            deadline,
+                        )?),
+                    )
+                    .await?;
+                    added += 1;
+                }
+            }
+            let _ = added;
             object(BTreeMap::new())
         }
         ApiCommand::Unsupported(_) => unreachable!("validated before connecting"),

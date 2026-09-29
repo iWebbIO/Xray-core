@@ -10,14 +10,14 @@ use crate::{
     config::{Config, Outbound, SocksSettings, StreamSettings},
     features::{StatsManager, policy::SystemStatsPolicy},
     protocol::{Reply, socks::AssociateRequest},
-    router::Router,
+    router::RouterHandle,
     transport::BoxStream,
 };
 
 pub(super) fn dispatcher(
     config: &Config,
     outbounds: &[Outbound],
-    router: Arc<Router>,
+    router: Arc<RouterHandle>,
     stats: Option<&StatsManager>,
     system: SystemStatsPolicy,
     resolver: Arc<dyn udp_routing::UdpResolver>,

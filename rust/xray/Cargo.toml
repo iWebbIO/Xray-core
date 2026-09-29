@@ -31,6 +31,10 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 x25519-dalek.workspace = true
 xray-core.workspace = true
+prost-reflect.workspace = true
+xray-proto.workspace = true
+serde.workspace = true
+prost.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 
 [lints]

@@ -278,6 +278,67 @@ impl BalancerObservations for crate::features::observatory_burst::BurstObserver 
     }
 }
 
+/// A swappable router handle: RoutingService swaps the compiled router at
+/// runtime (AddRule/RemoveRule recompile and swap), so every dispatcher holds
+/// this handle instead of a bare `Arc<Router>`. The balancer observation
+/// source survives swaps (re-attached to each new router).
+pub struct RouterHandle {
+    current: std::sync::RwLock<Arc<Router>>,
+    observations: std::sync::RwLock<Option<Arc<dyn BalancerObservations>>>,
+}
+
+impl RouterHandle {
+    pub fn new(router: Arc<Router>) -> Self {
+        Self {
+            current: std::sync::RwLock::new(router),
+            observations: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// The current compiled router.
+    pub fn get(&self) -> Arc<Router> {
+        self.current
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Swap in a newly compiled router, re-attaching the observation source.
+    pub fn swap(&self, router: Arc<Router>) {
+        if let Some(source) = self
+            .observations
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            router.set_balancer_observations(source);
+        }
+        *self.current.write().unwrap_or_else(|p| p.into_inner()) = router;
+    }
+
+    pub fn set_balancer_observations(&self, source: Arc<dyn BalancerObservations>) {
+        *self.observations.write().unwrap_or_else(|p| p.into_inner()) = Some(source.clone());
+        self.get().set_balancer_observations(source);
+    }
+
+    pub fn select(&self, context: &RouteContext<'_>) -> usize {
+        self.get().select(context)
+    }
+
+    pub fn select_with_route(&self, context: &RouteContext<'_>) -> (usize, bool) {
+        self.get().select_with_route(context)
+    }
+
+    pub fn select_with_route_sniffed(
+        &self,
+        context: &RouteContext<'_>,
+        sniffed_protocol: Option<&str>,
+    ) -> (usize, bool) {
+        self.get()
+            .select_with_route_sniffed(context, sniffed_protocol)
+    }
+}
+
 pub struct Router {
     rules: Vec<Rule>,
     /// Routing outbound tags in routing order: the registry balancer
@@ -541,6 +602,14 @@ impl Router {
     /// shared as `Arc<Router>`, so the runtime attaches its observatory
     /// through `&self` once built, e.g.
     /// `dispatcher.router.set_balancer_observations(source)`.
+    /// The compiled balancer by tag (the RoutingService override path).
+    pub fn balancer(&self, tag: &str) -> Option<Arc<Balancer>> {
+        self.balancers
+            .iter()
+            .find(|(balancer_tag, _)| balancer_tag == tag)
+            .map(|(_, balancer)| Arc::clone(balancer))
+    }
+
     pub fn set_balancer_observations(&self, source: Arc<dyn BalancerObservations>) {
         *self
             .observations

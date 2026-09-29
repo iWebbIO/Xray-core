@@ -15,6 +15,7 @@ mod burst_observatory;
 mod dialer_proxy;
 mod dns_runtime;
 mod handler_registry;
+mod hysteria_seam;
 mod mux_runtime;
 mod observatory;
 mod plain_udp;
@@ -32,7 +33,7 @@ use crate::{
     config::{Config, Inbound, Outbound},
     features::stats::TrafficCounters,
     protocol::{self, Reply, Request},
-    router::{RouteContext, Router},
+    router::{RouteContext, RouterHandle},
     transport::{
         AcceptedTransport, BoxStream, InboundListener, InboundTransport, OutboundTransport,
     },
@@ -46,7 +47,7 @@ const MAX_GRPC_STREAM_TASKS: usize = 64;
 struct Dispatcher {
     outbounds: Vec<Outbound>,
     transports: Vec<OutboundTransport>,
-    router: Arc<Router>,
+    router: Arc<RouterHandle>,
     udp: Option<Arc<dyn udp::UdpDispatcher>>,
     policy: crate::features::PolicyManager,
     stats: Option<Arc<crate::features::StatsManager>>,
@@ -75,10 +76,13 @@ struct Dispatcher {
     /// (Go's two ClientManagers per mux-enabled outbound handler).
     mux: Vec<Option<mux_runtime::MuxOutbound>>,
     /// The FakeDNS engine: fake-pool destinations map back to their domain
-    /// before routing (Go's dispatcher IsIPInIPool swap).
+    /// before routing (Go's dispatcher IsIPInIPPool swap).
     fake_dns: Option<std::sync::Arc<crate::dns::fakedns::FakeDnsEngine>>,
     /// The loopback dispatch seam (loopback outbounds re-enter here).
     loopback: std::sync::OnceLock<Arc<dyn protocol::loopback::LoopbackDispatch>>,
+    /// One shared authenticated QUIC session per hysteria outbound (Go's
+    /// clientManager cache); seeded from the compiled outbounds.
+    hysteria: hysteria_seam::HysteriaPool,
 }
 
 /// Owns listening sockets and every connection task. Dropping it cancels all work.
@@ -141,7 +145,7 @@ impl Server {
                     .collect()
             })
             .unwrap_or_default();
-        let router = Arc::new(compiled.router);
+        let router = Arc::new(RouterHandle::new(Arc::new(compiled.router)));
         // Mux.Cool carrier pools, one pair per mux-enabled outbound; each
         // pool dials its carriers through the dispatcher (weak-linked after
         // construction). The UDP routing view exposes the pool serving UDP
@@ -219,6 +223,14 @@ impl Server {
             outbound_tags.push(tag.clone());
         }
         let mut listeners: Vec<ListenerEntry> = Vec::new();
+        // The QUIC listeners of the hysteria inbounds: served through the
+        // dispatch seam, not the per-stream accept loop.
+        let mut hysteria_listeners: Vec<(
+            crate::transport::hysteria_endpoint::HysteriaEndpointListener,
+            Inbound,
+            String,
+            Option<std::sync::Arc<sniffing::SniffingRequest>>,
+        )> = Vec::new();
         // Startup inbound snapshots for the HandlerService registry, plus the
         // SS2022 UDP listeners that bind alongside their TCP listener.
         let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
@@ -232,6 +244,38 @@ impl Server {
             .with_context(|| format!("inbound {:?} sniffing", raw.tag))?;
             let sniff = sniff.map(Arc::new);
             for port in raw.port.ports() {
+                // Hysteria owns a QUIC listener per port: no TCP socket is
+                // bound and the streams dispatch through the QUIC seam.
+                if let Inbound::Hysteria { users } = &inbound {
+                    let listener =
+                        hysteria_seam::bind_inbound(&raw, users, *port).with_context(|| {
+                            format!(
+                                "cannot bind inbound {:?} on {}:{}",
+                                raw.tag, raw.listen, port
+                            )
+                        });
+                    let listener = match listener {
+                        Ok(listener) => listener,
+                        Err(error) => {
+                            for (listener, _, _, _, _) in listeners {
+                                if let Err(close_error) = listener.close().await {
+                                    tracing::warn!(%close_error, "inbound rollback close failed");
+                                }
+                            }
+                            hysteria_listeners.clear();
+                            return Err(error);
+                        }
+                    };
+                    addresses.push(listener.local_addr());
+                    seeds.push((raw.clone(), inbound.clone(), transport.clone()));
+                    hysteria_listeners.push((
+                        listener,
+                        inbound.clone(),
+                        raw.tag.clone(),
+                        sniff.clone(),
+                    ));
+                    continue;
+                }
                 let listener = match transport
                     .bind(SocketAddr::new(raw.listen, *port))
                     .await
@@ -334,6 +378,12 @@ impl Server {
                 }
             }
         }
+        // One shared authenticated QUIC session per hysteria outbound, keyed
+        // by the dialer Arc identity establish hands back.
+        let mut hysteria_pool = hysteria_seam::HysteriaPool::new();
+        for outbound in &compiled.outbounds {
+            hysteria_pool.seed(outbound);
+        }
         let dispatcher = Arc::new(Dispatcher {
             outbounds: compiled.outbounds,
             transports: compiled.outbound_transports,
@@ -351,6 +401,7 @@ impl Server {
             mux: mux_pools,
             fake_dns: compiled.fake_dns.clone(),
             loopback: Default::default(),
+            hysteria: hysteria_pool,
         });
         for outbound_mux in dispatcher.mux.iter().flatten() {
             for pool in [&outbound_mux.tcp, &outbound_mux.xudp]
@@ -380,12 +431,32 @@ impl Server {
         }
         // The registry serves HandlerService listings from the startup
         // snapshot and can spawn added inbounds through the accept loop.
-        let registry =
-            handler_registry::RuntimeRegistry::new(dispatcher.clone(), cancel_token.clone());
+        let registry = handler_registry::RuntimeRegistry::new(
+            dispatcher.clone(),
+            cancel_token.clone(),
+            config.routing.clone(),
+            dispatcher.outbound_tags.clone(),
+        );
+        registry.attach_router(Arc::clone(&dispatcher.router));
         for (raw, inbound, transport) in seeds {
             registry.seed_inbound(raw, inbound, transport);
         }
         registry.seed_outbounds(config.outbounds.clone());
+        let reflection_service = config
+            .api
+            .as_ref()
+            .is_some_and(|api| {
+                api.services
+                    .iter()
+                    .any(|service| service.eq_ignore_ascii_case("ReflectionService"))
+            })
+            .then(|| {
+                tonic_reflection::server::Builder::configure()
+                    .register_encoded_file_descriptor_set(xray_proto::FILE_DESCRIPTOR_SET)
+                    .build_v1()
+                    .context("build the reflection service")
+            })
+            .transpose()?;
         let api_server = config.api.as_ref().map(|api| {
             let mut routes = tonic::service::Routes::default();
             for service in &api.services {
@@ -432,6 +503,27 @@ impl Server {
                     routes,
                     crate::api::handler::HandlerService::new(registry.store()),
                 );
+            }
+            if api
+                .services
+                .iter()
+                .any(|service| service.eq_ignore_ascii_case("RoutingService"))
+            {
+                routes = crate::api::routing::add_routing_routes(
+                    routes,
+                    crate::api::routing::RoutingServiceBackend::new(registry.routing_store()),
+                );
+            }
+            if api
+                .services
+                .iter()
+                .any(|service| service.eq_ignore_ascii_case("ReflectionService"))
+            {
+                // gRPC server reflection over the full descriptor set (Go's
+                // commander reflection service).
+                if let Some(reflection) = reflection_service.as_ref() {
+                    routes = routes.add_service(reflection.clone());
+                }
             }
             crate::api::ApiServer::from_routes(routes)
         });
@@ -507,6 +599,14 @@ impl Server {
                     dispatcher.clone(),
                     stopping.clone(),
                 ));
+            }
+            for (listener, inbound, tag, sniff) in hysteria_listeners {
+                let dispatcher = dispatcher.clone();
+                let stop = stopping.clone();
+                let tag: Arc<str> = Arc::from(tag);
+                tasks.spawn(async move {
+                    hysteria_seam::serve(listener, inbound, tag, sniff, dispatcher, stop).await
+                });
             }
             if tasks.is_empty() {
                 stopping.cancelled().await;
@@ -1049,6 +1149,7 @@ async fn dispatch_common(
                     Inbound::Shadowsocks { .. } => "shadowsocks",
                     Inbound::Shadowsocks2022 { .. } => "shadowsocks-2022",
                     Inbound::Dns(_) => "dns",
+                    Inbound::Hysteria { .. } => "hysteria",
                 };
                 let admission = timeout(
                     DIAL_TIMEOUT,
@@ -1303,6 +1404,11 @@ async fn proxy_handshake(
     let request = match inbound {
         // The DNS inbound never reaches a proxy handshake.
         Inbound::Dns(_) => unreachable!("the dns inbound is served before the handshake"),
+        // Hysteria streams dispatch through the QUIC seam, never through the
+        // TCP handshake path.
+        Inbound::Hysteria { .. } => {
+            unreachable!("the hysteria inbound dispatches through its QUIC seam")
+        }
         Inbound::Vmess(authenticator) => {
             let (stream, request) = protocol::vmess::stream::accept(stream, authenticator).await?;
             return Ok((stream, InboundHandshake::Connect(request, None)));
@@ -1500,6 +1606,11 @@ async fn establish(
                 .wireguard
                 .connect(dispatcher, settings, target)
                 .await;
+        }
+        Outbound::Hysteria { dialer } => {
+            // One shared authenticated QUIC session per outbound; the pool
+            // keeps the cached connection and its UDP session table.
+            return dispatcher.hysteria.connect(dialer, target).await;
         }
     };
     let (mut stream, bound) = if let Some(addresses) = resolved {

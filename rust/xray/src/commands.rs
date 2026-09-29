@@ -24,6 +24,11 @@ pub enum Command {
         #[command(subcommand)]
         command: api::ApiCommand,
     },
+    /// Convert configuration formats.
+    Convert {
+        #[command(subcommand)]
+        command: convert::ConvertCommand,
+    },
     /// Generate an ML-KEM-768 key pair for VLESS Encryption.
     Mlkem768(SeedArgs),
     /// Generate an ML-DSA-65 signing seed and REALITY verification key.
@@ -104,6 +109,10 @@ pub fn execute_to(command: Command, out: &mut impl Write) -> Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(api::execute(command))?;
+            out.write_all(output.as_bytes())?;
+        }
+        Command::Convert { command } => {
+            let output = convert::execute(command)?;
             out.write_all(output.as_bytes())?;
         }
         Command::Mlkem768(args) => {
