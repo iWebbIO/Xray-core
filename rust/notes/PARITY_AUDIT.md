@@ -507,3 +507,19 @@ UDP, MASQUE HTTP/3, legacy SS UDP, dokodemo UDP, port ranges, user levels.
 - Gates both batches: fmt; clippy -D warnings clean; workspace tests
   **1248/0/5**; Go interop **34/34 + 6/6 + 8/8**; all five env-gated Go
   fixtures green.
+
+## September 29, 2026 — xdrive transport live; API user queries in the CLI
+
+- **XDRIVE stream transport** end to end: the engine-backed adapter
+  (XdriveSettings over Go's XDriveConfig keys, local + HTTP-template object
+  stores, per-stream sessions over the WAL) wired as `network: "xdrive"` —
+  inbound listeners accept from the store, outbound dials write to it, the
+  proxy handshake rides the object-store stream. Two-runtime e2e: SOCKS→SOCKS
+  with every byte of the second hop in shared storage. Named rejections:
+  unknown services (Google Drive parses but the native backend is not
+  implemented), malformed templates, security non-none.
+- **CLI**: `api inbounduser` / `api inboundusercount` (GetInboundUsers /
+  GetInboundUsersCount). The remaining api commands stay named rejections:
+  ado/rmo/lso (the runtime's outbound set is immutable after startup),
+  adu/rmu (alter_inbound needs mutable per-listener account sets).
+- Gates: fmt; clippy -D warnings clean; workspace tests **1256/0/5**.
