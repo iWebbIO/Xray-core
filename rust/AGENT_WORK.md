@@ -225,7 +225,10 @@ nested Mux.Cool carriers; bittorrent/UTP and fakedns sniffing; HTTP/3
 (QUIC) DNS; the geodata download scheduler; the metrics pprof app;
 HandlerService runtime mutations; the TUN runtime; `convert pb`; the
 pinned Hysteria BBR profiles and Brutal congestion (configs must select
-`reno`); finalmask mask chains (codecs ported, socket install pending);
+`reno`); finalmask mask chains (codecs ported, socket install rejected by
+name); kcp legacy header/seed obfuscation; xhttp xmux/download sessions;
+`convert pb`'s encoder rejecting exactly what the decoder cannot consume
+(the proto envelope's fail-closed list — documented per module);
 TLS fingerprint impersonation (uTLS); routed encrypted DNS without
 bootstrap pins; xudpProxyUDP443=skip. Known quinn deviations from Go's
 hysteria defaults (documented, not configurable): no stateless resets,
