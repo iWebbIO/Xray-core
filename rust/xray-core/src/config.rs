@@ -14,6 +14,7 @@ pub mod dns;
 pub mod legacy;
 pub mod observatory;
 pub mod protobuf;
+pub mod protobuf_encode;
 mod proxies;
 mod reality;
 mod vmess;

@@ -14,7 +14,7 @@ use base64::Engine as _;
 use clap::{Args, Subcommand};
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::Value;
-use std::io::Read as _;
+use std::{io::Read as _, path::PathBuf};
 
 /// The pool built once from the full descriptor set the proto crate embeds.
 fn pool() -> Result<DescriptorPool> {
@@ -72,11 +72,50 @@ pub fn execute(command: ConvertCommand) -> Result<String> {
             debug,
             configs,
         } => {
-            let _ = (out_pb_file, debug, configs);
-            bail!(
-                "convert pb requires the full config-to-protobuf encoder, \\
-                 which is not integrated in this CLI build"
-            );
+            // Go: -outpbfile or -debug must be present, and at least one
+            // config input.
+            let out_pb_file = out_pb_file.filter(|file| !file.is_empty());
+            if out_pb_file.is_none() && !debug {
+                bail!("-outpbfile not specified");
+            }
+            if configs.is_empty() {
+                bail!("invalid config list length: 0");
+            }
+            // Load and merge: later files merge over earlier, inbounds and
+            // outbounds matched by tag (the loader's merge, Go's
+            // core.LoadConfig).
+            let raw = crate::config_loader::load(&crate::config_loader::LoadOptions {
+                configs: configs.iter().map(PathBuf::from).collect(),
+                confdir: None,
+                format: "auto".into(),
+            })
+            .context("failed to load config")?;
+            let merged: xray_core::Config =
+                serde_json::from_value(raw).context("failed to decode the merged configuration")?;
+            // The Build-time failures surface here, exactly like Go's
+            // serial decode before the proto marshal.
+            merged
+                .validate()
+                .context("failed to load config: build-time validation")?;
+            let bytes = xray_core::config::protobuf_encode::to_bytes(&merged)
+                .context("failed to marshal the config to protobuf")?;
+            if debug {
+                // Go's creflect.MarshalToJson over the marshaled message:
+                // decode the bytes back through the descriptor pool and
+                // print the proto JSON.
+                let pool = pool()?;
+                let descriptor = pool
+                    .get_message_by_name("xray.core.Config")
+                    .context("the descriptor set carries xray.core.Config")?;
+                let message = DynamicMessage::decode(descriptor, bytes.as_slice())
+                    .context("decode the marshaled config for debug output")?;
+                let value = serde_json::to_value(&message)?;
+                return Ok(format!("{}\n", serde_json::to_string_pretty(&value)?));
+            }
+            let file = out_pb_file.expect("checked above");
+            std::fs::write(&file, &bytes)
+                .with_context(|| format!("failed to create proto file {file}"))?;
+            Ok(format!("Output ProtoBuf file is  {file}\n"))
         }
     }
 }
@@ -156,5 +195,111 @@ mod tests {
             value: "!!not base64!!".into(),
         };
         assert!(typed_message_to_json(&typed, false).is_err());
+    }
+
+    #[test]
+    fn convert_pb_round_trips_through_the_loader() {
+        // One config with load-bearing fields the encoder carries: encode to
+        // .pb, then load the .pb through the protobuf loader and validate
+        // (Go's `xray convert pb` output runs back through `xray run -c
+        // mix.pb --test`).
+        let config = serde_json::json!({
+            "log": {"loglevel": "warning"},
+            "inbounds": [{
+                "listen": "127.0.0.1", "port": 10808, "tag": "socks-in", "protocol": "socks",
+                "settings": {"auth": "password", "accounts": [{"user": "u", "pass": "p"}], "udp": true},
+                "sniffing": {"enabled": true, "destOverride": ["http", "tls"], "metadataOnly": false, "routeOnly": true}
+            }],
+            "outbounds": [{
+                "tag": "direct", "protocol": "freedom",
+                "settings": {"domainStrategy": "UseIPv4", "finalRules": [
+                    {"action": "allow", "network": "tcp,udp", "ip": ["127.0.0.1/32"], "port": 80}
+                ]}
+            }]
+        })
+        .to_string();
+        let dir = std::env::temp_dir().join(format!(
+            "xray-convert-pb-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(&dir, &config).unwrap();
+
+        let output =
+            std::env::temp_dir().join(format!("xray-convert-pb-{}.pb", std::process::id()));
+        let result = execute(ConvertCommand::Protobuf {
+            out_pb_file: Some(output.to_string_lossy().into_owned()),
+            debug: false,
+            configs: vec![dir.to_string_lossy().into_owned()],
+        })
+        .unwrap();
+        assert!(result.contains("Output ProtoBuf file"), "{result}");
+        assert!(output.exists(), "the .pb file must be written");
+
+        // The loader decodes the .pb back into a validated configuration.
+        let raw = crate::config_loader::load(&crate::config_loader::LoadOptions {
+            configs: vec![output.clone()],
+            confdir: None,
+            format: "pb".into(),
+        })
+        .unwrap();
+        let decoded: xray_core::Config = serde_json::from_value(raw).unwrap();
+        decoded.validate().expect("the .pb re-validates");
+        assert_eq!(decoded.inbounds[0].tag, "socks-in");
+        assert_eq!(decoded.outbounds[0].tag, "direct");
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    #[test]
+    fn convert_pb_flags_match_go_and_rejections_name_themselves() {
+        // -outpbfile or -debug is required.
+        let error = execute(ConvertCommand::Protobuf {
+            out_pb_file: None,
+            debug: false,
+            configs: vec!["nonexistent.json".into()],
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("-outpbfile not specified"));
+
+        // At least one config input is required.
+        let error = execute(ConvertCommand::Protobuf {
+            out_pb_file: Some("out.pb".into()),
+            debug: false,
+            configs: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid config list length"));
+
+        // A config the encoder cannot carry fails with the field named —
+        // never a lossy .pb file.
+        let config = serde_json::json!({
+            "inbounds": [{
+                "listen": "127.0.0.1", "port": 10808, "protocol": "vless",
+                "settings": {"decryption": "none", "clients": [{"id": "mux-user"}], "fallbacks": [{"dest": 80}]}
+            }],
+            "outbounds": [{"protocol": "freedom"}]
+        })
+        .to_string();
+        let dir = std::env::temp_dir().join(format!(
+            "xray-convert-pb-reject-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&dir, &config).unwrap();
+        let out =
+            std::env::temp_dir().join(format!("xray-convert-pb-reject-{}.pb", std::process::id()));
+        let error = execute(ConvertCommand::Protobuf {
+            out_pb_file: Some(out.to_string_lossy().into_owned()),
+            debug: false,
+            configs: vec![dir.to_string_lossy().into_owned()],
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("fallbacks"),
+            "the rejection must name the field: {message}"
+        );
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_file(&out);
     }
 }

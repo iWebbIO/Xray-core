@@ -1,6 +1,5 @@
 // Config-to-protobuf encoder: the exact inverse of `config/protobuf.rs`,
 // powering `xray convert pb` (main/commands/all/convert/protobuf.go).
-#![allow(dead_code)]
 //! One validated JSON [`Config`] becomes the bytes of the `xray.core.Config`
 //! message Go's `proto.Marshal` writes to a `.pb` file. The decoder in
 //! `config/protobuf.rs` is the specification: every proto shape it fails
