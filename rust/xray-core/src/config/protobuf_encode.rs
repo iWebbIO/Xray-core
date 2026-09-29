@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::proto::xray::{self as p, common::serial::TypedMessage};
-use crate::router::{PortSpec as RulePortSpec, RuleConfig, RoutingConfig};
+use crate::router::{PortSpec as RulePortSpec, RoutingConfig, RuleConfig};
 
 use super::{
     ApiConfig, Config, DokodemoSettings, FreedomSettings, HttpSettings, InboundConfig,
@@ -36,25 +36,39 @@ pub fn to_core_config(config: &Config) -> Result<p::core::Config> {
     // refused by name instead of emitting a config the runtime could not
     // read back.
     if config.dns.is_some() {
-        bail!("the \"dns\" app has no representation in the protobuf decoder envelope (xray.app.dns.Config is not integrated)");
+        bail!(
+            "the \"dns\" app has no representation in the protobuf decoder envelope (xray.app.dns.Config is not integrated)"
+        );
     }
     if config.reverse.is_some() {
-        bail!("\"reverse\" has no representation in the protobuf decoder envelope (the reverse app is not integrated)");
+        bail!(
+            "\"reverse\" has no representation in the protobuf decoder envelope (the reverse app is not integrated)"
+        );
     }
     if config.burst_observatory.is_some() {
-        bail!("\"burstObservatory\" has no representation in the protobuf decoder envelope (the burst observatory app is not integrated)");
+        bail!(
+            "\"burstObservatory\" has no representation in the protobuf decoder envelope (the burst observatory app is not integrated)"
+        );
     }
     if config.fake_dns.is_some() {
-        bail!("\"fakeDns\" has no representation in the protobuf decoder envelope (the fakedns app is not integrated)");
+        bail!(
+            "\"fakeDns\" has no representation in the protobuf decoder envelope (the fakedns app is not integrated)"
+        );
     }
     if config.metrics.is_some() {
-        bail!("\"metrics\" has no representation in the protobuf decoder envelope (the pprof app is not integrated)");
+        bail!(
+            "\"metrics\" has no representation in the protobuf decoder envelope (the pprof app is not integrated)"
+        );
     }
     if config.version.is_some() {
-        bail!("\"version\" has no representation in the protobuf decoder envelope (the version app is not integrated)");
+        bail!(
+            "\"version\" has no representation in the protobuf decoder envelope (the version app is not integrated)"
+        );
     }
     if config.geodata.is_some() {
-        bail!("\"geodata\" has no representation in the protobuf decoder envelope (the geodata scheduler app is not integrated)");
+        bail!(
+            "\"geodata\" has no representation in the protobuf decoder envelope (the geodata scheduler app is not integrated)"
+        );
     }
     if let Some(env) = &config.env {
         ensure!(
@@ -133,11 +147,7 @@ fn inbound_handler(raw: &InboundConfig) -> Result<p::core::InboundHandlerConfig>
         listen: Some(ip_or_domain(&listen.to_string(), "inbound listen")?),
         stream_settings: stream_config(&raw.stream_settings)?,
         receive_original_destination: false,
-        sniffing_settings: raw
-            .sniffing
-            .as_ref()
-            .map(sniffing_config)
-            .transpose()?,
+        sniffing_settings: raw.sniffing.as_ref().map(sniffing_config).transpose()?,
     };
     Ok(p::core::InboundHandlerConfig {
         tag: raw.tag.clone(),
@@ -218,11 +228,7 @@ fn ip_or_domain(address: &str, context: &str) -> Result<p::common::net::IpOrDoma
     })
 }
 
-fn user_message(
-    email: &str,
-    level: u32,
-    account: TypedMessage,
-) -> p::common::protocol::User {
+fn user_message(email: &str, level: u32, account: TypedMessage) -> p::common::protocol::User {
     p::common::protocol::User {
         level,
         email: email.to_owned(),
@@ -255,7 +261,9 @@ fn inbound_proxy(protocol: &str, settings: &Value) -> Result<TypedMessage> {
         "vless" => Ok(TypedMessage::pack(&vless_inbound(settings)?)),
         "vmess" => Ok(TypedMessage::pack(&vmess_inbound(settings)?)),
         "trojan" => Ok(TypedMessage::pack(&trojan_inbound(settings)?)),
-        "shadowsocks" => Ok(TypedMessage::pack(&shadowsocks_inbound(settings)?)),
+        // shadowsocks_inbound already returns the packed TypedMessage: the
+        // legacy and 2022 shapes are different message types.
+        "shadowsocks" => shadowsocks_inbound(settings),
         "hysteria" => bail!(
             "the hysteria inbound has no representation in the protobuf decoder envelope (xray.proxy.hysteria.Config is not integrated)"
         ),
@@ -268,12 +276,12 @@ fn inbound_proxy(protocol: &str, settings: &Value) -> Result<TypedMessage> {
         "dns" => bail!(
             "the dns inbound has no representation in the protobuf decoder envelope (xray.proxy.dns.Config is not integrated)"
         ),
-        "loopback" => bail!(
-            "loopback is an outbound protocol only; Go registers no loopback inbound"
-        ),
-        other => bail!(
-            "inbound protocol {other:?} is not integrated in the protobuf decoder envelope"
-        ),
+        "loopback" => {
+            bail!("loopback is an outbound protocol only; Go registers no loopback inbound")
+        }
+        other => {
+            bail!("inbound protocol {other:?} is not integrated in the protobuf decoder envelope")
+        }
     }
 }
 
@@ -448,7 +456,10 @@ fn vless_inbound(settings: &Value) -> Result<p::proxy::vless::inbound::Config> {
         raw.flow.is_empty(),
         "VLESS inbound settings have no \"flow\" field; set flow per client"
     );
-    ensure!(raw.fallbacks.is_empty(), "VLESS fallbacks are not migrated yet");
+    ensure!(
+        raw.fallbacks.is_empty(),
+        "VLESS fallbacks are not migrated yet"
+    );
     let users = raw.clients.unwrap_or(raw.users);
     Ok(p::proxy::vless::inbound::Config {
         users: users
@@ -669,14 +680,16 @@ fn shadowsocks_inbound(settings: &Value) -> Result<TypedMessage> {
         }));
     }
     if raw.method.starts_with("2022-") {
-        return Ok(TypedMessage::pack(&p::proxy::shadowsocks_2022::ServerConfig {
-            method: raw.method,
-            key: raw.password,
-            email: raw.email,
-            level: i32::try_from(raw.level)
-                .context("Shadowsocks 2022 level exceeds the protobuf int32")?,
-            network,
-        }));
+        return Ok(TypedMessage::pack(
+            &p::proxy::shadowsocks_2022::ServerConfig {
+                method: raw.method,
+                key: raw.password,
+                email: raw.email,
+                level: i32::try_from(raw.level)
+                    .context("Shadowsocks 2022 level exceeds the protobuf int32")?,
+                network,
+            },
+        ));
     }
     ensure!(
         !raw.password.is_empty(),
@@ -709,7 +722,9 @@ fn outbound_proxy(protocol: &str, settings: &Value) -> Result<TypedMessage> {
         "vless" => Ok(TypedMessage::pack(&vless_outbound(settings)?)),
         "vmess" => Ok(TypedMessage::pack(&vmess_outbound(settings)?)),
         "trojan" => Ok(TypedMessage::pack(&trojan_outbound(settings)?)),
-        "shadowsocks" => Ok(TypedMessage::pack(&shadowsocks_outbound(settings)?)),
+        // shadowsocks_outbound already returns the packed TypedMessage: the
+        // legacy and 2022 shapes are different message types.
+        "shadowsocks" => shadowsocks_outbound(settings),
         "masque" => bail!(
             "the masque outbound has no representation in the protobuf decoder envelope (xray.proxy.masque.ClientConfig is not integrated)"
         ),
@@ -725,9 +740,9 @@ fn outbound_proxy(protocol: &str, settings: &Value) -> Result<TypedMessage> {
         "hysteria" => bail!(
             "the hysteria outbound has no representation in the protobuf decoder envelope (xray.proxy.hysteria.Config is not integrated)"
         ),
-        other => bail!(
-            "outbound protocol {other:?} is not integrated in the protobuf decoder envelope"
-        ),
+        other => {
+            bail!("outbound protocol {other:?} is not integrated in the protobuf decoder envelope")
+        }
     }
 }
 
@@ -868,7 +883,11 @@ fn freedom_final_rule(
             .map(rule_port_list)
             .transpose()?
             .map(|range| p::common::net::PortList { range }),
-        ip: rule.ip.iter().map(|value| ip_rule(value)).collect::<Result<_>>()?,
+        ip: rule
+            .ip
+            .iter()
+            .map(|value| ip_rule(value))
+            .collect::<Result<_>>()?,
         block_delay,
     })
 }
@@ -987,7 +1006,12 @@ fn socks_outbound(settings: &Value) -> Result<p::proxy::socks::ClientConfig> {
         })
         .transpose()?;
     Ok(p::proxy::socks::ClientConfig {
-        server: Some(server_endpoint(&server.address, server.port, user, "SOCKS server")?),
+        server: Some(server_endpoint(
+            &server.address,
+            server.port,
+            user,
+            "SOCKS server",
+        )?),
     })
 }
 
@@ -1010,7 +1034,12 @@ fn http_outbound(settings: &Value) -> Result<p::proxy::http::ClientConfig> {
         )
     });
     Ok(p::proxy::http::ClientConfig {
-        server: Some(server_endpoint(&server.address, server.port, user, "HTTP server")?),
+        server: Some(server_endpoint(
+            &server.address,
+            server.port,
+            user,
+            "HTTP server",
+        )?),
         // Custom HTTP headers are refused by the decoder's envelope.
         header: Vec::new(),
     })
@@ -1055,7 +1084,10 @@ fn vless_outbound(settings: &Value) -> Result<p::proxy::vless::outbound::Config>
             }],
         },
         None => {
-            ensure!(raw.vnext.len() == 1, "VLESS requires exactly one vnext server");
+            ensure!(
+                raw.vnext.len() == 1,
+                "VLESS requires exactly one vnext server"
+            );
             raw.vnext.into_iter().next().unwrap()
         }
     };
@@ -1243,12 +1275,17 @@ fn shadowsocks_outbound(settings: &Value) -> Result<TypedMessage> {
             server.level == 0,
             "Shadowsocks 2022 outbound \"level\" has no representation in the protobuf decoder envelope (the 2022 client message carries address/port/method/password only)"
         );
-        return Ok(TypedMessage::pack(&p::proxy::shadowsocks_2022::ClientConfig {
-            address: Some(ip_or_domain(&server.address, "Shadowsocks 2022 server address")?),
-            port: u32::from(server.port),
-            method: server.method,
-            key: server.password,
-        }));
+        return Ok(TypedMessage::pack(
+            &p::proxy::shadowsocks_2022::ClientConfig {
+                address: Some(ip_or_domain(
+                    &server.address,
+                    "Shadowsocks 2022 server address",
+                )?),
+                port: u32::from(server.port),
+                method: server.method,
+                key: server.password,
+            },
+        ));
     }
     ensure!(
         !server.password.is_empty(),
@@ -1383,11 +1420,7 @@ fn stream_config(stream: &StreamSettings) -> Result<Option<p::transport::interne
             .as_ref()
             .map(grpc_settings)
             .transpose()?,
-        "mkcp" => stream
-            .kcp_settings
-            .as_ref()
-            .map(kcp_settings)
-            .transpose()?,
+        "mkcp" => stream.kcp_settings.as_ref().map(kcp_settings).transpose()?,
         _ => stream
             .xhttp_settings
             .as_ref()
@@ -1432,28 +1465,32 @@ fn stream_config(stream: &StreamSettings) -> Result<Option<p::transport::interne
 fn websocket_settings(value: &Value) -> Result<TypedMessage> {
     let parsed = crate::transport::websocket::Config::from_json(value)
         .map_err(|error| anyhow::anyhow!("invalid WebSocket settings: {error}"))?;
-    Ok(TypedMessage::pack(&p::transport::internet::websocket::Config {
-        host: parsed.host,
-        path: parsed.path,
-        header: parsed.headers.into_iter().collect(),
-        ed: u32::try_from(parsed.early_data_limit)
-            .context("WebSocket early-data limit exceeds the protobuf uint32")?,
-        heartbeat_period: u32::try_from(parsed.heartbeat_period.as_secs())
-            .context("WebSocket heartbeat period exceeds the protobuf uint32")?,
-        accept_proxy_protocol: false,
-    }))
+    Ok(TypedMessage::pack(
+        &p::transport::internet::websocket::Config {
+            host: parsed.host,
+            path: parsed.path,
+            header: parsed.headers.into_iter().collect(),
+            ed: u32::try_from(parsed.early_data_limit)
+                .context("WebSocket early-data limit exceeds the protobuf uint32")?,
+            heartbeat_period: u32::try_from(parsed.heartbeat_period.as_secs())
+                .context("WebSocket heartbeat period exceeds the protobuf uint32")?,
+            accept_proxy_protocol: false,
+        },
+    ))
 }
 
 fn httpupgrade_settings(value: &Value) -> Result<TypedMessage> {
     let parsed = crate::transport::httpupgrade::HttpUpgradeConfig::from_json(value)
         .map_err(|error| anyhow::anyhow!("invalid HTTP Upgrade settings: {error}"))?;
-    Ok(TypedMessage::pack(&p::transport::internet::httpupgrade::Config {
-        host: parsed.host,
-        path: parsed.path,
-        header: parsed.headers.into_iter().collect(),
-        ed: parsed.early_data,
-        accept_proxy_protocol: false,
-    }))
+    Ok(TypedMessage::pack(
+        &p::transport::internet::httpupgrade::Config {
+            host: parsed.host,
+            path: parsed.path,
+            header: parsed.headers.into_iter().collect(),
+            ed: parsed.early_data,
+            accept_proxy_protocol: false,
+        },
+    ))
 }
 
 /// `kcpSettings` → the mkcp message with Go's defaults materialized (Go's
@@ -1503,7 +1540,10 @@ enum RangeJson {
     Text(String),
 }
 
-fn range(value: Option<&RangeJson>, key: &str) -> Result<Option<p::transport::internet::splithttp::RangeConfig>> {
+fn range(
+    value: Option<&RangeJson>,
+    key: &str,
+) -> Result<Option<p::transport::internet::splithttp::RangeConfig>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -1621,7 +1661,8 @@ fn xhttp_settings(value: &Value) -> Result<TypedMessage> {
     };
     // Null values are absent, like the native parser.
     merged.retain(|_, value| !value.is_null());
-    let raw: XhttpJson = serde_json::from_value(Value::Object(merged)).context("invalid XHTTP settings")?;
+    let raw: XhttpJson =
+        serde_json::from_value(Value::Object(merged)).context("invalid XHTTP settings")?;
     ensure!(
         raw.x_padding_method.is_empty() || raw.x_padding_method == "repeat-x",
         "xPaddingMethod {:?} is not carried by the protobuf decoder envelope (native XHTTP tokenish HPACK padding is not implemented)",
@@ -1635,39 +1676,47 @@ fn xhttp_settings(value: &Value) -> Result<TypedMessage> {
         raw.server_max_header_bytes >= 0,
         "serverMaxHeaderBytes cannot be negative"
     );
-    Ok(TypedMessage::pack(&p::transport::internet::splithttp::Config {
-        host: raw.host,
-        path: raw.path,
-        mode: raw.mode,
-        headers: raw.headers.unwrap_or_default().into_iter().collect(),
-        no_grpc_header: raw.no_grpc_header,
-        no_sse_header: raw.no_sse_header,
-        x_padding_obfs_mode: raw.x_padding_obfs_mode,
-        x_padding_key: raw.x_padding_key,
-        x_padding_header: raw.x_padding_header,
-        x_padding_placement: raw.x_padding_placement,
-        x_padding_method: raw.x_padding_method,
-        uplink_http_method: raw.uplink_http_method,
-        session_id_placement: raw.session_id_placement,
-        session_id_key: raw.session_id_key,
-        seq_placement: raw.seq_placement,
-        seq_key: raw.seq_key,
-        uplink_data_placement: raw.uplink_data_placement,
-        uplink_data_key: raw.uplink_data_key,
-        x_padding_bytes: range(raw.x_padding_bytes.as_ref(), "xPaddingBytes")?,
-        sc_max_each_post_bytes: range(raw.sc_max_each_post_bytes.as_ref(), "scMaxEachPostBytes")?,
-        sc_min_posts_interval_ms: range(raw.sc_min_posts_interval_ms.as_ref(), "scMinPostsIntervalMs")?,
-        sc_stream_up_server_secs: range(
-            raw.sc_stream_up_server_secs.as_ref(),
-            "scStreamUpServerSecs",
-        )?,
-        uplink_chunk_size: range(raw.uplink_chunk_size.as_ref(), "uplinkChunkSize")?,
-        sc_max_buffered_posts: raw.sc_max_buffered_posts,
-        server_max_header_bytes: raw.server_max_header_bytes,
-        // The decoder rejects xmux/downloadSettings and the custom session-ID
-        // fields; they stay at their defaults.
-        ..Default::default()
-    }))
+    Ok(TypedMessage::pack(
+        &p::transport::internet::splithttp::Config {
+            host: raw.host,
+            path: raw.path,
+            mode: raw.mode,
+            headers: raw.headers.unwrap_or_default().into_iter().collect(),
+            no_grpc_header: raw.no_grpc_header,
+            no_sse_header: raw.no_sse_header,
+            x_padding_obfs_mode: raw.x_padding_obfs_mode,
+            x_padding_key: raw.x_padding_key,
+            x_padding_header: raw.x_padding_header,
+            x_padding_placement: raw.x_padding_placement,
+            x_padding_method: raw.x_padding_method,
+            uplink_http_method: raw.uplink_http_method,
+            session_id_placement: raw.session_id_placement,
+            session_id_key: raw.session_id_key,
+            seq_placement: raw.seq_placement,
+            seq_key: raw.seq_key,
+            uplink_data_placement: raw.uplink_data_placement,
+            uplink_data_key: raw.uplink_data_key,
+            x_padding_bytes: range(raw.x_padding_bytes.as_ref(), "xPaddingBytes")?,
+            sc_max_each_post_bytes: range(
+                raw.sc_max_each_post_bytes.as_ref(),
+                "scMaxEachPostBytes",
+            )?,
+            sc_min_posts_interval_ms: range(
+                raw.sc_min_posts_interval_ms.as_ref(),
+                "scMinPostsIntervalMs",
+            )?,
+            sc_stream_up_server_secs: range(
+                raw.sc_stream_up_server_secs.as_ref(),
+                "scStreamUpServerSecs",
+            )?,
+            uplink_chunk_size: range(raw.uplink_chunk_size.as_ref(), "uplinkChunkSize")?,
+            sc_max_buffered_posts: raw.sc_max_buffered_posts,
+            server_max_header_bytes: raw.server_max_header_bytes,
+            // The decoder rejects xmux/downloadSettings and the custom session-ID
+            // fields; they stay at their defaults.
+            ..Default::default()
+        },
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1766,8 +1815,12 @@ fn tls_config(value: &Value) -> Result<p::transport::internet::tls::Config> {
 /// `oneTimeLoading` defaults to true when no paths are given.
 fn tls_certificate(cert: &TlsCertJson) -> Result<p::transport::internet::tls::Certificate> {
     let certificate = if !cert.certificate_file.is_empty() {
-        std::fs::read(&cert.certificate_file)
-            .with_context(|| format!("cannot read the TLS certificate file {:?}", cert.certificate_file))?
+        std::fs::read(&cert.certificate_file).with_context(|| {
+            format!(
+                "cannot read the TLS certificate file {:?}",
+                cert.certificate_file
+            )
+        })?
     } else if !cert.certificate.is_empty() {
         cert.certificate.join("\n").into_bytes()
     } else {
@@ -1979,9 +2032,9 @@ fn api_app(api: &ApiConfig) -> Result<p::app::commander::Config> {
     let mut services = Vec::new();
     for service in &api.services {
         match service.to_ascii_lowercase().as_str() {
-            "statsservice" => {
-                services.push(TypedMessage::pack(&p::app::stats::command::Config::default()))
-            }
+            "statsservice" => services.push(TypedMessage::pack(
+                &p::app::stats::command::Config::default(),
+            )),
             "loggerservice" => {
                 services.push(TypedMessage::pack(&p::app::log::command::Config::default()))
             }
@@ -2083,8 +2136,15 @@ fn routing_rule(rule: &RuleConfig) -> Result<p::app::router::RoutingRule> {
             .iter()
             .map(|value| domain_rule(value))
             .collect::<Result<_>>()?,
-        ip: rule.ip.iter().map(|value| ip_rule(value)).collect::<Result<_>>()?,
-        source_ip: source.iter().map(|value| ip_rule(value)).collect::<Result<_>>()?,
+        ip: rule
+            .ip
+            .iter()
+            .map(|value| ip_rule(value))
+            .collect::<Result<_>>()?,
+        source_ip: source
+            .iter()
+            .map(|value| ip_rule(value))
+            .collect::<Result<_>>()?,
         networks,
         port_list: rule
             .port
@@ -2268,9 +2328,9 @@ fn ip_rule(rule: &str) -> Result<p::common::geodata::IpRule> {
         let prefix = if prefix.is_empty() {
             max
         } else {
-            let prefix = prefix
-                .parse::<u32>()
-                .with_context(|| format!("illegal IP rule {rule:?}: invalid CIDR prefix length {prefix:?}"))?;
+            let prefix = prefix.parse::<u32>().with_context(|| {
+                format!("illegal IP rule {rule:?}: invalid CIDR prefix length {prefix:?}")
+            })?;
             ensure!(
                 prefix <= max,
                 "illegal IP rule {rule:?}: CIDR prefix length {prefix} exceeds max {max}"
@@ -2329,8 +2389,8 @@ mod tests {
     }
 
     fn rejection(json: &str, expected: &str) {
-        let config = Config::from_json(json)
-            .unwrap_or_else(|error| panic!("{json}: parse: {error}"));
+        let config =
+            Config::from_json(json).unwrap_or_else(|error| panic!("{json}: parse: {error}"));
         // The whole context chain, so nested serde errors name their field.
         let error = format!("{:#}", to_bytes(&config).unwrap_err());
         assert!(
@@ -2378,8 +2438,14 @@ mod tests {
         assert_eq!(outbound.settings["redirect"], "192.0.2.10:8080");
         assert_eq!(outbound.settings["userLevel"], 2);
         assert_eq!(outbound.settings["finalRules"][0]["action"], "block");
-        assert_eq!(outbound.settings["finalRules"][0]["network"], ["tcp"]);
-        assert_eq!(outbound.settings["finalRules"][0]["ip"], ["10.0.0.0/8"]);
+        assert_eq!(
+            outbound.settings["finalRules"][0]["network"],
+            json!(["tcp"])
+        );
+        assert_eq!(
+            outbound.settings["finalRules"][0]["ip"],
+            json!(["10.0.0.0/8"])
+        );
         assert_eq!(outbound.settings["finalRules"][0]["port"], "80-90");
         assert_eq!(outbound.settings["finalRules"][0]["blockDelay"], "5-10");
         assert_eq!(outbound.settings["finalRules"][1]["action"], "allow");
@@ -2424,10 +2490,12 @@ mod tests {
         assert_eq!(stream.network, "websocket");
         assert_eq!(stream.security, "tls");
         // The decoder re-appends the extracted early-data parameter.
-        assert!(stream.ws_settings.as_ref().unwrap()["path"]
-            .as_str()
-            .unwrap()
-            .contains("ed=2048"));
+        assert!(
+            stream.ws_settings.as_ref().unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .contains("ed=2048")
+        );
         assert_eq!(
             stream.tls_settings.as_ref().unwrap()["serverName"],
             "example.test"
@@ -2574,7 +2642,8 @@ mod tests {
         assert_eq!(settings["xPaddingBytes"], "100-200");
         assert_eq!(settings["headers"]["X-Pad"], "1");
         assert_eq!(settings["noGRPCHeader"], true);
-        assert_eq!(settings["scMaxEachPostBytes"], "1000000");
+        // Single-number ranges come back in the decoder's canonical "a-b" form.
+        assert_eq!(settings["scMaxEachPostBytes"], "1000000-1000000");
         let raw = &decoded.outbounds[4].stream_settings;
         assert_eq!(raw.network, "tcp");
         assert!(raw.tcp_settings.is_none());
@@ -2639,13 +2708,19 @@ mod tests {
         assert_eq!(routing.rules[0].outbound_tag, "direct");
         assert_eq!(
             routing.rules[0].domain,
-            ["full:example.test", "keyword:example", "keyword:example.test"]
+            [
+                "full:example.test",
+                "keyword:example",
+                "keyword:example.test"
+            ]
         );
         assert_eq!(
             routing.rules[0].ip,
             ["10.0.0.0/8", "!1.2.3.4/32", "1.2.3.4/32"]
         );
-        assert!(matches!(&routing.rules[0].port, Some(RulePortSpec::List(list)) if list == "80-90"));
+        assert!(
+            matches!(&routing.rules[0].port, Some(RulePortSpec::List(list)) if list == "80-90")
+        );
         assert_eq!(routing.rules[1].ip, ["2001:db8::/32"]);
     }
 
@@ -2665,22 +2740,15 @@ mod tests {
         assert_eq!(decoded.routing.domain_strategy, "");
     }
 
-    const CA_PEM: &str = "-----BEGIN CERTIFICATE-----
-MIIB2DCCAX+gAwIBAgIQY11wsHA83Wkn9isHTro/izAKBggqhkjOPQQDAjA0MRww
-GgYDVQQKExNYcmF5IFJ1c3QgTWlncmF0aW9uMRQwEgYDVQQDEwtDTEkgRml4dHVy
-ZTAeFw0yNjA5MTkxNzU2MTZaFw0yNjEyMTgxODU2MTZaMDQxHDAaBgNVBAoTE1hy
-YXkgUnVzdCBNaWdyYXRpb24xFDASBgNVBAMTC0NMSSBGaXh0dXJlMFkwEwYHKoZI
-zj0CAQYIKoZIzj0DAQcDQgAEukB+qaL8N1zXmCMW8dBg1IlgnA7RBX8Og+dXY9aQ
-+jwAeKfqNJAfuaiCLACVncW/i0n7GdLxoFum5B6N7JmjC6NzMHEwDgYDVR0PAQH/
-BAQDAgKkMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8GA1UdEwEB/wQFMAMBAf8wHQYD
-VR0OBBYEFKE/u8Cae2BuRwniBBly8ioTH68MMBoGA1UdEQQTMBGCD2ZpeHR1cmUu
-ZXhhbXBsZTAKBggqhkjOPQQDAgNHADBEAiAfcX+L8duSuBYCBzbvu69wz1BAnCNk
-2rkAdHB2Dvx2oQIgHSaEEM4jtLzhPo2NjcvSjZCxoWvcWNGN3vchEMBuz49Q=
------END CERTIFICATE-----";
+    // The CLI's client-CA fixture (a valid, parseable certificate), embedded
+    // verbatim like the decoder's own protobuf fixture; the file's trailing
+    // newline is not part of the PEM lines the JSON surface carries.
+    const CA_PEM: &str = include_str!("../../../xray/src/commands/fixtures/ca.pem");
 
     #[test]
     fn tls_certificates_roundtrip_inline_and_from_files() {
-        let pem_lines: Vec<&str> = CA_PEM.lines().collect();
+        let expected = CA_PEM.trim_end();
+        let pem_lines: Vec<&str> = expected.lines().collect();
         // Inline lines: Go embeds the snapshot with oneTimeLoading set.
         let inline = serde_json::to_string(&json!({
             "outbounds": [
@@ -2709,16 +2777,17 @@ ZXhhbXBsZTAKBggqhkjOPQQDAgNHADBEAiAfcX+L8duSuBYCBzbvu69wz1BAnCNk
         let certificate = tls["certificates"][0]["certificate"]
             .as_array()
             .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(certificate, CA_PEM);
+        assert_eq!(certificate, expected);
         assert_eq!(tls["certificates"][0]["usage"], "verify");
         assert_eq!(tls["serverName"], "fixture.example");
         // Paths: Go reads and embeds the initial snapshot; the decoder
         // verifies the files still match before keeping the path form.
-        let path = std::env::temp_dir().join(format!(
-            "xray-protobuf-encode-{}.pem",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("xray-protobuf-encode-{}.pem", std::process::id()));
         std::fs::write(&path, CA_PEM).expect("write the certificate fixture");
         let from_file = serde_json::to_string(&json!({
             "outbounds": [
@@ -2753,8 +2822,11 @@ ZXhhbXBsZTAKBggqhkjOPQQDAgNHADBEAiAfcX+L8duSuBYCBzbvu69wz1BAnCNk
             tls["certificates"][0]["certificate"]
                 .as_array()
                 .unwrap()
+                .iter()
+                .map(|line| line.as_str().unwrap())
+                .collect::<Vec<_>>()
                 .join("\n"),
-            CA_PEM
+            expected
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -2779,11 +2851,14 @@ ZXhhbXBsZTAKBggqhkjOPQQDAgNHADBEAiAfcX+L8duSuBYCBzbvu69wz1BAnCNk
             ("full:x", 3, "x"),
             ("plain.example", 0, "plain.example"),
         ] {
-            assert!(matches!(
-                domain_rule(rule).unwrap().value,
-                Some(p::common::geodata::domain_rule::Value::Custom(ref domain))
-                    if domain.r#type == kind && domain.value == value
-            ), "{rule}");
+            assert!(
+                matches!(
+                    domain_rule(rule).unwrap().value,
+                    Some(p::common::geodata::domain_rule::Value::Custom(ref domain))
+                        if domain.r#type == kind && domain.value == value
+                ),
+                "{rule}"
+            );
         }
         assert!(matches!(
             domain_rule("dotless:x").unwrap().value,
@@ -2943,7 +3018,7 @@ ZXhhbXBsZTAKBggqhkjOPQQDAgNHADBEAiAfcX+L8duSuBYCBzbvu69wz1BAnCNk
                 "downloadSettings",
             ),
             (
-                r#"{"outbounds":[{"protocol":"freedom","streamSettings":{"network":"xhttp","xhttpSettings":{"xPaddingBytes":"100-0"}}}}]}"#,
+                r#"{"outbounds":[{"protocol":"freedom","streamSettings":{"network":"xhttp","xhttpSettings":{"xPaddingBytes":"100-0"}}}]}"#,
                 "zero upper bound",
             ),
             (
