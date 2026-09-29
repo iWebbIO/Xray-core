@@ -214,6 +214,12 @@ all five env-gated Go fixtures green):
   dispatcher with XUDP), the shared-session outbound pool; verified by two
   full-runtime tests plus the engine suite.
 
+- HandlerService add/remove inbounds (every inbound family, per-tag listener
+  tokens; alter_inbound user edits stay a named rejection), the CLI adi/rmi/lsi.
+- The five late modules, all wired into config/runtime: the TUN inbound, the
+  WireGuard inbound, the tcpSettings.header obfuscation, the unix domain
+  socket listener, and the browser dialer on the websocket outbound.
+
 Explicitly-rejected surfaces (fail with named errors, never silently):
 nested Mux.Cool carriers; bittorrent/UTP and fakedns sniffing; HTTP/3
 (QUIC) DNS; the geodata download scheduler; the metrics pprof app;
@@ -253,3 +259,22 @@ XRAY_GO_BINARY path; all five env-gated Go fixtures):
   Go default congestion needs `reno`), quicParams debug/disableGSO/
   disableStatelessReset, finalmask mask chains; documented quinn
   deviations: no stateless resets, no Chrome fingerprint parroting.
+
+## Checkpoint — September 29, 2026, handler mutations + five wired modules
+
+Two commits: (1) HandlerService AddInbound/RemoveInbound live through the
+runtime's own listener machinery (protobuf decode → config validation →
+bind/spawn on per-tag child tokens; every inbound family covered), plus the
+CLI `api adi` encoder / `api rmi` / `api lsi`; (2) the five agent-ported
+modules wired into config and runtime — the TUN inbound (no port key,
+device + netstack + full-cone UDP), the WireGuard inbound (per-port UDP
+endpoints), the `tcpSettings.header` obfuscation (accept-side after TLS,
+dial-side before the first write; two-runtime e2e with HTTP camouflage on
+the wire), the unix domain socket listener (`ListenAddress` path-or-IP,
+dokodemo-only, Windows named platform rejection), and the browser dialer
+(armed at startup, websocket outbound routing). Gates at each commit: fmt;
+clippy -D warnings; workspace tests 1242/0/5 then **1248/0/5**; interop
+34/34 + 6/6 + 8/8; all five env-gated Go fixtures green. Deviations
+recorded in PARITY_AUDIT.md (GetInboundUser on non-user-managed inbounds
+answers empty; browser-dialer websocket early data not carried; tun OS
+plumbing options named-rejected).

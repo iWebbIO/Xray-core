@@ -465,3 +465,45 @@ UDP, MASQUE HTTP/3, legacy SS UDP, dokodemo UDP, port ranges, user levels.
   fingerprint (Go's defaults differ — documented, not fixable).
 - Gates: fmt/clippy -D warnings clean; workspace tests **1175/0/5**;
   Go interop **34/34, 6/6, 8/8**; all five env-gated Go fixtures green.
+
+## September 29, 2026 — handler mutations live, five modules wired (last two batches)
+
+- **HandlerService AddInbound/RemoveInbound** now work: the wire config
+  decodes through the startup protobuf converter (receiver sniffing added;
+  `receiveOriginalDestination` named-rejected), recompiles with the ordinary
+  validation, and binds through the runtime's accept loop on a per-tag child
+  token; every inbound family the runtime serves is covered (TCP listeners,
+  hysteria QUIC, TUN devices, WireGuard endpoints, unix sockets, and the
+  SS/dokodemo/SS2022 UDP sidecars). RemoveInbound cancels exactly that tag's
+  listeners. E2E: a SOCKS password relay through an AddInbound'd listener,
+  close-on-remove, Go's existing-tag and ErrNoClue contracts. Deviation:
+  GetInboundUser on non-user-managed inbounds answers empty where Go errors.
+- **CLI**: `api adi` (the InboundHandlerConfig encoder over the decoder's
+  exact coverage — socks/http/dokodemo/vless/vmess/trojan/shadowsocks
+  including 2022, plain-TCP or TLS receivers, PEM certificate parsing),
+  `api rmi` (tag or config-file targets), `api lsi` (isOnlyTags honored).
+- **TUN inbound** wired: config arm → runtime entry, one serve task per
+  inbound (no port key needed — InboundConfig.port now defaults to Go's
+  zero), full-cone UDP through the dispatcher. Named rejections: desc, dns
+  install, autoSystemRoutingTable, autoOutboundsInterface (OS plumbing);
+  mtu < 1280 (netstack floor).
+- **WireGuard inbound** wired: one UDP endpoint per port, server-role engine
+  with catch-all listener bootstrap (SYN-peek on decrypted packets),
+  loopback engine e2e both TCP and UDP.
+- **tcpSettings.header** wired end-to-end: StreamSettings decodes
+  rawSettings (header object; null fails like Go's loader), the codec wraps
+  the accept (after TLS) and the dial (before the first proxy write); the
+  e2e test runs SOCKS→SOCKS over two runtimes with HTTP camouflage on the
+  wire between them.
+- **Unix domain sockets** wired: `ListenAddress` (IP or path) on the inbound
+  config; dokodemo network lists parse Go-style (tcp/udp/unix entries); a
+  path listen binds the unix listener (abstract `@`/`@@` and `,perm`
+  parsing, lockfile exclusivity; Windows fails with the named platform
+  rejection, never a TCP fallback).
+- **Browser dialer** wired: armed at Server::start (Go's ReloadEnvSettings
+  path), the websocket outbound dials through it when
+  XRAY_BROWSER_DIALER carries an address; early data is not carried through
+  the browser path (documented deviation).
+- Gates both batches: fmt; clippy -D warnings clean; workspace tests
+  **1248/0/5**; Go interop **34/34 + 6/6 + 8/8**; all five env-gated Go
+  fixtures green.
