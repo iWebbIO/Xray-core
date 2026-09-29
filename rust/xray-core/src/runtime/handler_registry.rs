@@ -1,17 +1,18 @@
 //! Runtime backing for the HandlerService management API.
 //!
-//! The read path is served from the startup snapshot: inbound/outbound
-//! listings carry the handler tags with the receiver (listen/port) settings,
-//! and user queries are answered from the raw inbound settings (the compiled
-//! accounts keep only key material hashes, which cannot be listed back).
+//! AddInbound decodes the wire config through the startup protobuf
+//! conversion (which fails closed on everything it cannot represent),
+//! compiles it with the ordinary config validation, and binds a listener
+//! through the runtime's own accept loop on a child of the server token;
+//! RemoveInbound cancels exactly that tag's listeners (startup and
+//! runtime-added alike). Listings and user queries are served from the raw
+//! inbound settings (the compiled accounts keep only key material hashes,
+//! which cannot be listed back).
 //!
-//! Every mutating operation this runtime build cannot perform honestly fails
-//! explicitly, never silently: the runtime's outbound set and per-listener
-//! account sets are immutable after startup (adding or removing handlers
-//! needs the proto-to-config decoder for `InboundHandlerConfig` plus
-//! listener ownership handoff from the server task, both not integrated
-//! yet), and `alter_inbound` user edits would need mutable per-inbound
-//! account sets.
+//! The remaining mutations fail explicitly, never silently: the runtime's
+//! outbound set is immutable after startup (AddOutbound/RemoveOutbound need a
+//! mutable dispatcher, not integrated), and `alter_inbound` user edits would
+//! need mutable per-listener account sets.
 
 use std::{
     net::IpAddr,
@@ -49,11 +50,18 @@ struct SeededInbound {
 struct RegistryState {
     inbounds: Vec<SeededInbound>,
     outbounds: Vec<OutboundConfig>,
+    /// One cancellation token per inbound tag: RemoveInbound cancels exactly
+    /// this inbound's listeners (startup and runtime-added alike).
+    inbound_tokens: std::collections::HashMap<String, CancellationToken>,
 }
 
 pub(super) struct RuntimeRegistry {
     state: Arc<Mutex<RegistryState>>,
     routing: Arc<RuntimeRoutingStore>,
+    /// The runtime dispatcher spawned listeners dispatch through.
+    dispatcher: Arc<Dispatcher>,
+    /// The server token; runtime-added inbounds get children of it.
+    cancel: CancellationToken,
 }
 
 /// The runtime backing for RoutingService: the original routing config plus
@@ -264,18 +272,18 @@ fn ip_from_bytes(bytes: &[u8]) -> std::net::IpAddr {
 
 impl RuntimeRegistry {
     pub(super) fn new(
-        _dispatcher: Arc<Dispatcher>,
-        _cancel: CancellationToken,
+        dispatcher: Arc<Dispatcher>,
+        cancel: CancellationToken,
         routing: crate::router::RoutingConfig,
         outbound_tags: Vec<String>,
     ) -> Arc<Self> {
-        // The dispatcher and server token feed the dynamic-listener path
-        // (add/remove through the runtime's own accept loop); the read path
-        // needs only the seeded snapshot below.
-        let _ = (_dispatcher, _cancel);
+        // The dispatcher and server token feed the dynamic-listener path:
+        // AddInbound binds and spawns through the runtime's own accept loop.
         Arc::new(Self {
             state: Arc::default(),
             routing: Arc::new(RuntimeRoutingStore::new(routing, outbound_tags)),
+            dispatcher,
+            cancel,
         })
     }
 
@@ -315,16 +323,32 @@ impl RuntimeRegistry {
             .outbounds = outbounds;
     }
 
+    /// Record one startup inbound's cancellation token so RemoveInbound can
+    /// close exactly that inbound's listeners.
+    pub(super) fn attach_inbound_cancel(&self, tag: String, token: CancellationToken) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .inbound_tokens
+            .insert(tag, token);
+    }
+
     /// The store backing HandlerService; it shares the registry's snapshot.
     pub(super) fn store(&self) -> Arc<dyn HandlerStore> {
         Arc::new(StoreHandle {
             state: self.state.clone(),
+            dispatcher: self.dispatcher.clone(),
+            cancel: self.cancel.clone(),
         })
     }
 }
 
 struct StoreHandle {
     state: Arc<Mutex<RegistryState>>,
+    /// The runtime dispatcher the spawned listeners dispatch through.
+    dispatcher: Arc<Dispatcher>,
+    /// The server token; every runtime-added inbound gets a child of it.
+    cancel: CancellationToken,
 }
 
 /// Encode one proto message as a TypedMessage, like Go's `serial.ToTypedMessage`.
@@ -450,28 +474,166 @@ fn inbound_users(raw: &InboundConfig, inbound: &Inbound) -> Vec<User> {
 
 #[tonic::async_trait]
 impl HandlerStore for StoreHandle {
-    async fn add_inbound(&self, _config: InboundHandlerConfig) -> Result<(), HandlerStoreError> {
-        Err(HandlerStoreError::Message(
-            "adding inbounds at runtime requires the InboundHandlerConfig decoder, \
-             which is not integrated in this runtime build"
-                .into(),
-        ))
-    }
-
-    async fn remove_inbound(&self, tag: &str) -> Result<(), HandlerStoreError> {
-        // The store contract: an unknown or empty tag fails with NoClue.
-        let state = self
+    /// `core.AddInboundHandler` over the runtime's own listener machinery:
+    /// decode the wire config through the startup protobuf conversion (which
+    /// fails closed on everything it cannot represent), compile it with the
+    /// ordinary config validation, bind, spawn the accept loop on a child of
+    /// the server token, and register the seed. A bind failure cancels the
+    /// inbound's child token and registers nothing.
+    async fn add_inbound(&self, config: InboundHandlerConfig) -> Result<(), HandlerStoreError> {
+        let error = |error: anyhow::Error| HandlerStoreError::Message(format!("{error:#}"));
+        let json = crate::config::protobuf::inbound_handler(config).map_err(error)?;
+        let raw: InboundConfig = serde_json::from_value(json).map_err(|e| error(e.into()))?;
+        if !raw.tag.is_empty() {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state
+                .inbounds
+                .iter()
+                .any(|existing| existing.raw.tag == raw.tag)
+            {
+                return Err(HandlerStoreError::ExistingTag(raw.tag));
+            }
+        }
+        let sniff = super::sniffing::SniffingRequest::compile(
+            raw.sniffing.as_ref(),
+            &crate::geodata::GeoDataStore::from_env().map_err(error)?,
+        )
+        .map_err(error)?
+        .map(Arc::new);
+        let (inbound, transport) = crate::config::compile_inbound(&raw).map_err(error)?;
+        let cancel = self.cancel.child_token();
+        let tag: Arc<str> = Arc::from(raw.tag.as_str());
+        for port in raw.port.ports() {
+            let address = std::net::SocketAddr::new(raw.listen, *port);
+            if let crate::config::Inbound::Hysteria { users } = &inbound {
+                let listener =
+                    super::hysteria_seam::bind_inbound(&raw, users, *port).map_err(error)?;
+                let serve = super::hysteria_seam::serve(
+                    listener,
+                    inbound.clone(),
+                    tag.clone(),
+                    sniff.clone(),
+                    self.dispatcher.clone(),
+                    cancel.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(ended) = serve.await {
+                        tracing::warn!(%ended, "hysteria listener ended");
+                    }
+                });
+                continue;
+            }
+            let listener = transport.bind(address).await.map_err(|e| error(e.into()))?;
+            tokio::spawn(super::accept_loop(
+                listener,
+                inbound.clone(),
+                raw.tag.clone(),
+                transport.clone(),
+                sniff.clone(),
+                self.dispatcher.clone(),
+                cancel.clone(),
+            ));
+        }
+        // The UDP sidecars the seeds loop binds beside their TCP listener.
+        match &inbound {
+            crate::config::Inbound::Shadowsocks { account, udp: true } => {
+                for port in raw.port.ports() {
+                    let bound = super::plain_udp::LegacyShadowsocksUdp::bind(
+                        std::net::SocketAddr::new(raw.listen, *port),
+                        account,
+                    )
+                    .map_err(error)?;
+                    let dispatcher = self.dispatcher.clone();
+                    let tag = tag.clone();
+                    let stop = cancel.clone();
+                    tokio::spawn(async move {
+                        let _ = bound.run(dispatcher, tag, stop).await;
+                    });
+                }
+            }
+            crate::config::Inbound::Dokodemo {
+                destination,
+                udp: true,
+            } => {
+                for port in raw.port.ports() {
+                    let dispatcher = self.dispatcher.clone();
+                    let tag = tag.clone();
+                    let destination = destination.clone();
+                    let stop = cancel.clone();
+                    let address = std::net::SocketAddr::new(raw.listen, *port);
+                    tokio::spawn(async move {
+                        let _ = super::plain_udp::serve_dokodemo_udp(
+                            address,
+                            destination,
+                            dispatcher,
+                            tag,
+                            stop,
+                        )
+                        .await;
+                    });
+                }
+            }
+            crate::config::Inbound::Shadowsocks2022 { account, udp: true } => {
+                for port in raw.port.ports() {
+                    let bound = super::ss2022_udp_runtime::Ss2022UdpListener::bind(
+                        std::net::SocketAddr::new(raw.listen, *port),
+                        account,
+                    )
+                    .map_err(error)?;
+                    let dispatcher = self.dispatcher.clone();
+                    let stop = cancel.clone();
+                    tokio::spawn(async move {
+                        let _ = bound.run(dispatcher, stop).await;
+                    });
+                }
+            }
+            _ => (),
+        }
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Re-check under the lock: a concurrent add of the same tag loses.
+        if !raw.tag.is_empty()
+            && state
+                .inbounds
+                .iter()
+                .any(|existing| existing.raw.tag == raw.tag)
+        {
+            drop(state);
+            cancel.cancel();
+            return Err(HandlerStoreError::ExistingTag(raw.tag));
+        }
+        state.inbounds.push(SeededInbound {
+            raw,
+            inbound,
+            transport,
+        });
+        if !tag.is_empty() {
+            state.inbound_tokens.insert(tag.to_string(), cancel);
+        }
+        Ok(())
+    }
+
+    /// `inbound.Manager.RemoveHandler`: cancel the tag's listeners and drop
+    /// the seed; an empty or unknown tag is `common.ErrNoClue`.
+    async fn remove_inbound(&self, tag: &str) -> Result<(), HandlerStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The store contract: an unknown or empty tag fails with NoClue.
         if tag.is_empty() || !state.inbounds.iter().any(|seeded| seeded.raw.tag == tag) {
             return Err(HandlerStoreError::NoClue);
         }
-        Err(HandlerStoreError::Message(
-            "removing inbounds at runtime requires listener ownership handoff, \
-             which is not integrated in this runtime build"
-                .into(),
-        ))
+        if let Some(token) = state.inbound_tokens.remove(tag) {
+            token.cancel();
+        }
+        state.inbounds.retain(|seeded| seeded.raw.tag != tag);
+        Ok(())
     }
 
     async fn alter_inbound(

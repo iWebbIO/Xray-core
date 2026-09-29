@@ -171,6 +171,13 @@ fn networks(values: Vec<i32>) -> Result<String> {
         .map(|values| values.join(","))
 }
 
+/// Decode one `InboundHandlerConfig` (the AddInbound wire shape) into the
+/// inbound JSON surface — the same conversion the startup protobuf config
+/// uses, exposed for the HandlerService runtime path.
+pub(crate) fn inbound_handler(handler: p::core::InboundHandlerConfig) -> Result<Value> {
+    inbound(handler)
+}
+
 fn inbound(mut handler: p::core::InboundHandlerConfig) -> Result<Value> {
     let receiver = handler
         .receiver_settings
@@ -195,15 +202,49 @@ fn inbound(mut handler: p::core::InboundHandlerConfig) -> Result<Value> {
         .parse()
         .context("protobuf domain/unix inbound listeners are not integrated")?;
     let stream = stream(receiver.stream_settings.take())?;
-    supported_rest(receiver, "inbound receiver (sniffing/original destination)")?;
+    let sniffing = receiver
+        .sniffing_settings
+        .take()
+        .map(sniffing)
+        .transpose()?;
+    ensure!(
+        !receiver.receive_original_destination,
+        "protobuf inbound original destination is not integrated"
+    );
+    supported_rest(receiver, "inbound receiver")?;
     let proxy = handler
         .proxy_settings
         .take()
         .context("protobuf inbound proxy settings are required")?;
     let (protocol, settings) = inbound_proxy(&proxy)?;
-    let result = json!({"tag":take(&mut handler.tag), "listen":listen, "port":port(port_list.range[0].from)?,
+    let mut result = json!({"tag":take(&mut handler.tag), "listen":listen, "port":port(port_list.range[0].from)?,
         "protocol":protocol, "settings":settings, "streamSettings":stream});
+    if let Some(sniffing) = sniffing {
+        result["sniffing"] = sniffing;
+    }
     supported_rest(handler, "inbound handler")?;
+    Ok(result)
+}
+
+/// One receiver SniffingConfig proto → the `sniffing` JSON object. The
+/// domain/IP exclusion rules carry the geodata rule model, which the JSON
+/// surface takes as plain string lists; a non-empty rule list fails closed.
+fn sniffing(mut value: p::app::proxyman::SniffingConfig) -> Result<Value> {
+    let result = json!({
+        "enabled": take(&mut value.enabled),
+        "destOverride": take(&mut value.destination_override),
+        "metadataOnly": take(&mut value.metadata_only),
+        "routeOnly": take(&mut value.route_only),
+    });
+    ensure!(
+        value.domains_excluded.is_empty(),
+        "protobuf sniffing domainsExcluded rules are not integrated"
+    );
+    ensure!(
+        value.ips_excluded.is_empty(),
+        "protobuf sniffing ipsExcluded rules are not integrated"
+    );
+    supported_rest(value, "sniffing")?;
     Ok(result)
 }
 

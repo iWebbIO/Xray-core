@@ -59,9 +59,45 @@ pub enum ApiCommand {
     /// Add routing rules from config files (JSON config format).
     #[command(name = "adrules")]
     AddRules(AddRulesArgs),
+    /// Add inbounds from config files (their `inbounds` fields).
+    #[command(name = "adi")]
+    AddInbounds(AddInboundsArgs),
+    /// Remove inbounds by tag, or by the tags a config file carries.
+    #[command(name = "rmi")]
+    RemoveInbounds(RemoveInboundsArgs),
+    /// List the running inbounds.
+    #[command(name = "lsi")]
+    ListInbounds(ListInboundsArgs),
     /// Preserve an explicit unsupported-service diagnostic for other commands.
     #[command(external_subcommand)]
     Unsupported(Vec<String>),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct AddInboundsArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// Config files whose `inbounds` fields carry the handlers (stdin with `-`).
+    #[arg(required = true)]
+    pub configs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct RemoveInboundsArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// An inbound tag, or a config file whose inbound tags to remove.
+    #[arg(required = true)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ListInboundsArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// Print only the inbound tags.
+    #[arg(long, default_value_t = false)]
+    pub is_only_tags: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -162,11 +198,15 @@ impl ApiCommand {
             | Self::ListRules(args) => args,
             Self::RemoveRules(args) => &args.connection,
             Self::AddRules(args) => &args.connection,
+            Self::ListInbounds(args) => &args.connection,
+            Self::AddInbounds(args) => &args.connection,
+            Self::RemoveInbounds(args) => &args.connection,
             Self::Unsupported(args) => {
                 let name = args.first().map(String::as_str).unwrap_or("");
                 let service = match name {
-                    "adi" | "ado" | "rmi" | "rmo" | "lsi" | "lso" | "adu" | "rmu"
-                    | "inbounduser" | "inboundusercount" => "HandlerService",
+                    "ado" | "rmo" | "lso" | "adu" | "rmu" | "inbounduser" | "inboundusercount" => {
+                        "HandlerService"
+                    }
                     "bi" | "bo" | "sib" => "RoutingService",
                     "observatory" | "outboundstatus" => {
                         "ObservatoryService with a real observation provider"
@@ -648,6 +688,101 @@ async fn execute_at(command: ApiCommand, deadline: Instant) -> Result<String> {
             let _ = added;
             object(BTreeMap::new())
         }
+        ApiCommand::AddInbounds(args) => {
+            use xray_proto::xray::app::proxyman::command::{
+                AddInboundRequest, handler_service_client::HandlerServiceClient,
+            };
+            let mut client = HandlerServiceClient::new(channel);
+            for config_path in &args.configs {
+                let inbounds = read_inbounds(config_path)?;
+                for inbound in inbounds {
+                    let handler = inbound_to_handler(&inbound)
+                        .with_context(|| format!("invalid inbound in {config_path}"))?;
+                    rpc(
+                        deadline,
+                        "failed to perform AddInbound",
+                        client.add_inbound(request(
+                            AddInboundRequest {
+                                inbound: Some(handler),
+                            },
+                            deadline,
+                        )?),
+                    )
+                    .await?;
+                }
+            }
+            object(BTreeMap::new())
+        }
+        ApiCommand::RemoveInbounds(args) => {
+            use xray_proto::xray::app::proxyman::command::{
+                RemoveInboundRequest, handler_service_client::HandlerServiceClient,
+            };
+            let mut client = HandlerServiceClient::new(channel);
+            for target in &args.targets {
+                // A readable config file contributes its inbound tags; every
+                // other argument is a tag itself, exactly like the source.
+                let tags = match std::fs::read_to_string(target) {
+                    Ok(raw) => serde_json::from_str::<Value>(&raw)
+                        .with_context(|| format!("invalid inbound configuration {target}"))?
+                        .get("inbounds")
+                        .and_then(|inbounds| inbounds.as_array())
+                        .map(|inbounds| {
+                            inbounds
+                                .iter()
+                                .filter_map(|inbound| {
+                                    inbound.get("tag").and_then(|tag| tag.as_str())
+                                })
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    Err(_) => vec![target.clone()],
+                };
+                for tag in tags {
+                    rpc(
+                        deadline,
+                        "failed to perform RemoveInbound",
+                        client.remove_inbound(request(RemoveInboundRequest { tag }, deadline)?),
+                    )
+                    .await?;
+                }
+            }
+            object(BTreeMap::new())
+        }
+        ApiCommand::ListInbounds(args) => {
+            use xray_proto::xray::app::proxyman::command::{
+                ListInboundsRequest, handler_service_client::HandlerServiceClient,
+            };
+            let mut client = HandlerServiceClient::new(channel);
+            let response = rpc(
+                deadline,
+                "failed to perform ListInbounds",
+                client.list_inbounds(request(
+                    ListInboundsRequest {
+                        is_only_tags: args.is_only_tags,
+                    },
+                    deadline,
+                )?),
+            )
+            .await?;
+            let inbounds = response
+                .into_inner()
+                .inbounds
+                .into_iter()
+                .map(|inbound| {
+                    object({
+                        let mut fields = Object::new();
+                        text(&mut fields, "tag", inbound.tag);
+                        fields
+                    })
+                })
+                .collect::<Vec<_>>();
+            object({
+                let mut fields = Object::new();
+                fields.insert("inbounds".into(), Value::Array(inbounds));
+                fields
+            })
+        }
         ApiCommand::Unsupported(_) => unreachable!("validated before connecting"),
     };
     format_json(value)
@@ -848,6 +983,526 @@ fn format_json(value: Value) -> Result<String> {
         .replace('\u{2029}', "\\u2029"))
 }
 
+// ---------------------------------------------------------------------------
+// The AddInbound encoder: the startup inbound JSON surface back into the
+// InboundHandlerConfig wire shape, mirroring the decoder's coverage exactly
+// (plain TCP or TLS receivers, and the protocols the decoder carries).
+// ---------------------------------------------------------------------------
+
+/// Read one config file (or `-` for stdin) and return its `inbounds` array.
+fn read_inbounds(config_path: &str) -> Result<Vec<Value>> {
+    let raw = if config_path == "-" {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .context("cannot read the inbound configuration from stdin")?;
+        buffer
+    } else {
+        std::fs::read_to_string(config_path)
+            .with_context(|| format!("cannot read the inbound configuration {config_path}"))?
+    };
+    let document: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid inbound configuration {config_path}"))?;
+    document
+        .get("inbounds")
+        .and_then(|inbounds| inbounds.as_array())
+        .cloned()
+        .context("the configuration carries no inbounds")
+}
+
+/// One PEM block's DER bytes from a list of JSON certificate lines.
+fn pem_der(lines: &[String], label: &str) -> Result<Vec<u8>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let text: String = lines.concat();
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let start = text
+        .find(&begin)
+        .with_context(|| format!("no {label} PEM block"))?;
+    let body_start = start + begin.len();
+    let stop = text[body_start..]
+        .find(&end)
+        .map(|offset| offset + body_start)
+        .with_context(|| format!("unterminated {label} PEM block"))?;
+    let body: String = text[body_start..stop]
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    STANDARD
+        .decode(body)
+        .with_context(|| format!("invalid base64 in the {label} PEM block"))
+}
+
+/// Encode one inbound (the startup JSON surface) into the AddInbound wire
+/// shape. Everything the decoder cannot carry fails by name here, so the
+/// command never silently downgrades a configuration.
+fn inbound_to_handler(inbound: &Value) -> Result<xray_proto::xray::core::InboundHandlerConfig> {
+    use xray_proto::xray::{
+        app::proxyman::ReceiverConfig,
+        common::net::{IpOrDomain, PortList, PortRange, ip_or_domain},
+        transport::internet::{StreamConfig, TransportConfig, tls},
+    };
+
+    let tag = inbound
+        .get("tag")
+        .and_then(|tag| tag.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    // The receiver: one port, one IP listen address, a plain TCP or TLS
+    // stream — the decoder's exact coverage.
+    let port = inbound.get("port").and_then(|port| port.as_u64());
+    let Some(port) = port else {
+        bail!("the adi encoder requires a single numeric \"port\"");
+    };
+    ensure!(
+        (1..=65535).contains(&port),
+        "the inbound port {port} is out of range"
+    );
+    let listen = inbound
+        .get("listen")
+        .and_then(|listen| listen.as_str())
+        .unwrap_or("0.0.0.0");
+    let listen_ip: std::net::IpAddr = listen
+        .parse()
+        .with_context(|| format!("the adi encoder requires an IP \"listen\", got {listen:?}"))?;
+    let stream_settings = inbound.get("streamSettings").cloned().unwrap_or_default();
+    let network = stream_settings
+        .get("network")
+        .and_then(|network| network.as_str())
+        .unwrap_or("tcp");
+    ensure!(
+        matches!(network, "" | "tcp" | "raw"),
+        "the adi encoder supports the plain TCP transport, got {network:?}"
+    );
+    let security = stream_settings
+        .get("security")
+        .and_then(|security| security.as_str())
+        .unwrap_or("");
+    let mut stream = StreamConfig {
+        protocol_name: "tcp".to_owned(),
+        transport_settings: vec![TransportConfig {
+            protocol_name: "tcp".to_owned(),
+            settings: Some(typed_of(
+                &xray_proto::xray::transport::internet::tcp::Config::default(),
+            )),
+        }],
+        ..Default::default()
+    };
+    match security {
+        "" | "none" => (),
+        "tls" => {
+            let tls_settings = stream_settings
+                .get("tlsSettings")
+                .cloned()
+                .unwrap_or_default();
+            let mut config = tls::Config::default();
+            if let Some(certificates) = tls_settings
+                .get("certificates")
+                .and_then(|certificates| certificates.as_array())
+            {
+                for certificate in certificates {
+                    let lines = |key: &str| -> Vec<String> {
+                        match certificate.get(key) {
+                            Some(Value::Array(lines)) => lines
+                                .iter()
+                                .filter_map(|line| line.as_str().map(str::to_owned))
+                                .collect(),
+                            Some(Value::String(text)) => text.lines().map(str::to_owned).collect(),
+                            _ => Vec::new(),
+                        }
+                    };
+                    config.certificate.push(tls::Certificate {
+                        certificate: pem_der(&lines("certificate"), "CERTIFICATE")?,
+                        key: pem_der(&lines("key"), "PRIVATE KEY")?,
+                        ..Default::default()
+                    });
+                }
+            }
+            // The remaining TLS keys the proto carries; anything else on the
+            // JSON surface fails by name instead of silently dropping.
+            for (json_key, unsupported) in [
+                ("serverName", false),
+                ("fingerprint", true),
+                ("certificateFile", true),
+                ("keyFile", true),
+                ("ocspStapling", false),
+                ("oneTimeLoading", false),
+                ("buildChain", false),
+                ("pinnedPeerCertSha256", true),
+                ("verifyPeerCertByNam", true),
+                ("echServerKeys", true),
+                ("echConfigList", true),
+                ("echSockopt", true),
+            ] {
+                if unsupported && let Some(value) = tls_settings.get(json_key) {
+                    ensure!(
+                        value.is_null()
+                            || value.as_str().is_some_and(str::is_empty)
+                            || value.as_bool() == Some(false)
+                            || value.as_array().is_some_and(Vec::is_empty),
+                        "the adi encoder does not carry tlsSettings {json_key:?}"
+                    );
+                }
+            }
+            let string_list = |key: &str| -> Vec<String> {
+                match tls_settings.get(key) {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_owned))
+                        .collect(),
+                    Some(Value::String(text)) => vec![text.clone()],
+                    _ => Vec::new(),
+                }
+            };
+            config.server_name = tls_settings
+                .get("serverName")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            config.next_protocol = string_list("alpn");
+            config.curve_preferences = string_list("curvePreferences");
+            config.reject_unknown_sni = tls_settings
+                .get("rejectUnknownSni")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_default();
+            config.disable_system_root = tls_settings
+                .get("disableSystemRoot")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_default();
+            config.enable_session_resumption = tls_settings
+                .get("enableSessionResumption")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_default();
+            config.min_version = tls_settings
+                .get("minVersion")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            config.max_version = tls_settings
+                .get("maxVersion")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            config.cipher_suites = tls_settings
+                .get("cipherSuites")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            config.master_key_log = tls_settings
+                .get("masterKeyLog")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            stream.security_type = "xray.transport.internet.tls.Config".to_owned();
+            stream.security_settings = vec![typed_of(&config)];
+        }
+        other => bail!("the adi encoder supports security none/tls, got {other:?}"),
+    }
+    let receiver = ReceiverConfig {
+        port_list: Some(PortList {
+            range: vec![PortRange {
+                from: port as u32,
+                to: port as u32,
+            }],
+        }),
+        listen: Some(IpOrDomain {
+            address: Some(ip_or_domain::Address::Ip(match listen_ip {
+                std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+                std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+            })),
+        }),
+        stream_settings: Some(stream),
+        ..Default::default()
+    };
+
+    // The proxy settings: the protocols the decoder carries, encoded back
+    // from the same JSON keys.
+    let settings = inbound.get("settings").cloned().unwrap_or_default();
+    let protocol = inbound
+        .get("protocol")
+        .and_then(|protocol| protocol.as_str())
+        .unwrap_or_default();
+    let proxy = proxy_settings(protocol, &settings)?;
+    Ok(xray_proto::xray::core::InboundHandlerConfig {
+        tag,
+        receiver_settings: Some(typed_of(&receiver)),
+        proxy_settings: Some(proxy),
+    })
+}
+
+/// One proto message as a TypedMessage (the encoder twin of the decoder's
+/// `unpack`).
+fn typed_of<M: prost::Message + prost::Name>(
+    message: &M,
+) -> xray_proto::xray::common::serial::TypedMessage {
+    xray_proto::xray::common::serial::TypedMessage {
+        // prost's Name::type_url() prefixes a slash; Go's TypedMessage
+        // carries the bare type name (the decoder trims the same way).
+        r#type: M::type_url().trim_start_matches('/').to_owned(),
+        value: message.encode_to_vec(),
+    }
+}
+
+/// The per-protocol proxy settings encoder: the decoder's supported set,
+/// encoded back from the same JSON keys. Anything outside fails by name.
+fn proxy_settings(
+    protocol: &str,
+    settings: &Value,
+) -> Result<xray_proto::xray::common::serial::TypedMessage> {
+    use xray_proto::xray::common::net::{IpOrDomain, ip_or_domain};
+    use xray_proto::xray::common::protocol::User;
+    let string = |value: &Value, key: &str| -> String {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let number = |value: &Value, key: &str| -> u64 {
+        value.get(key).and_then(|v| v.as_u64()).unwrap_or_default()
+    };
+    let flag = |value: &Value, key: &str| -> bool {
+        value.get(key).and_then(|v| v.as_bool()).unwrap_or_default()
+    };
+    // The IPOrDomain encoder the address fields share: an IP stays an IP, a
+    // non-empty text becomes a domain, and empty stays empty.
+    let ip_or_domain_of = |text: &str| -> IpOrDomain {
+        IpOrDomain {
+            address: Some(match text.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(ip)) => ip_or_domain::Address::Ip(ip.octets().to_vec()),
+                Ok(std::net::IpAddr::V6(ip)) => ip_or_domain::Address::Ip(ip.octets().to_vec()),
+                Err(_) if !text.is_empty() => ip_or_domain::Address::Domain(text.to_owned()),
+                Err(_) => ip_or_domain::Address::Ip(Vec::new()),
+            }),
+        }
+    };
+    let clients = |settings: &Value| -> Vec<Value> {
+        settings
+            .get("clients")
+            .or_else(|| settings.get("users"))
+            .and_then(|users| users.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let user = |value: &Value| -> Result<User> {
+        Ok(User {
+            email: string(value, "email"),
+            level: number(value, "level") as u32,
+            account: Some(account_settings(protocol, value)?),
+        })
+    };
+    match protocol {
+        "socks" => {
+            let auth = settings
+                .get("auth")
+                .and_then(|auth| auth.as_str())
+                .unwrap_or("noauth");
+            let auth_type = match auth {
+                "noauth" => xray_proto::xray::proxy::socks::AuthType::NoAuth as i32,
+                "password" => xray_proto::xray::proxy::socks::AuthType::Password as i32,
+                other => bail!("the adi encoder cannot carry SOCKS auth {other:?}"),
+            };
+            let mut accounts = std::collections::HashMap::new();
+            for account in settings
+                .get("accounts")
+                .and_then(|accounts| accounts.as_array())
+                .unwrap_or(&Vec::new())
+            {
+                accounts.insert(string(account, "user"), string(account, "pass"));
+            }
+            let config = xray_proto::xray::proxy::socks::ServerConfig {
+                auth_type,
+                accounts,
+                udp_enabled: flag(settings, "udp"),
+                address: settings
+                    .get("ip")
+                    .and_then(|ip| ip.as_str())
+                    .map(ip_or_domain_of),
+                ..Default::default()
+            };
+            Ok(typed_of(&config))
+        }
+        "http" => {
+            let mut accounts = std::collections::HashMap::new();
+            for account in settings
+                .get("accounts")
+                .and_then(|accounts| accounts.as_array())
+                .unwrap_or(&Vec::new())
+            {
+                accounts.insert(string(account, "user"), string(account, "pass"));
+            }
+            let config = xray_proto::xray::proxy::http::ServerConfig {
+                accounts,
+                allow_transparent: flag(settings, "allowTransparent"),
+                user_level: number(settings, "userLevel") as u32,
+            };
+            Ok(typed_of(&config))
+        }
+        "dokodemo-door" | "tunnel" => {
+            let network = settings
+                .get("network")
+                .or_else(|| settings.get("allowedNetworks"))
+                .and_then(|network| network.as_str())
+                .unwrap_or("tcp");
+            let allowed_networks = match network {
+                "tcp" => vec![2],
+                "tcp,udp" => vec![2, 3],
+                other => bail!("the adi encoder cannot carry dokodemo network {other:?}"),
+            };
+            let config = xray_proto::xray::proxy::dokodemo::Config {
+                rewrite_address: Some(ip_or_domain_of(&string(settings, "address"))),
+                rewrite_port: number(settings, "port") as u32,
+                follow_redirect: flag(settings, "followRedirect"),
+                user_level: number(settings, "userLevel") as u32,
+                allowed_networks,
+                ..Default::default()
+            };
+            Ok(typed_of(&config))
+        }
+        "vless" => {
+            let mut users = Vec::new();
+            for client in &clients(settings) {
+                users.push(user(client)?);
+            }
+            let decryption = settings
+                .get("decryption")
+                .and_then(|decryption| decryption.as_str())
+                .unwrap_or("none");
+            ensure!(
+                decryption == "none" || decryption.starts_with("mlkem"),
+                "the adi encoder cannot carry VLESS decryption {decryption:?}"
+            );
+            let config = xray_proto::xray::proxy::vless::inbound::Config {
+                users,
+                decryption: decryption.to_owned(),
+                ..Default::default()
+            };
+            Ok(typed_of(&config))
+        }
+        "vmess" => {
+            let mut users = Vec::new();
+            for client in &clients(settings) {
+                ensure!(
+                    number(client, "alterId") == 0 && string(client, "experiments").is_empty(),
+                    "the adi encoder cannot carry VMess legacy accounts"
+                );
+                users.push(user(client)?);
+            }
+            let config = xray_proto::xray::proxy::vmess::inbound::Config {
+                user: users,
+                default: settings.get("default").map(|default| {
+                    xray_proto::xray::proxy::vmess::inbound::DefaultConfig {
+                        level: number(default, "level") as u32,
+                    }
+                }),
+            };
+            Ok(typed_of(&config))
+        }
+        "trojan" => {
+            let mut users = Vec::new();
+            for client in &clients(settings) {
+                users.push(user(client)?);
+            }
+            let config = xray_proto::xray::proxy::trojan::ServerConfig {
+                users,
+                ..Default::default()
+            };
+            Ok(typed_of(&config))
+        }
+        "shadowsocks" => {
+            // The 2022 single-key settings travel whole; legacy AEAD carries
+            // its one account (the decoder's exact supported shape).
+            let method = string(settings, "method");
+            if method.starts_with("2022-") {
+                let network = settings
+                    .get("network")
+                    .and_then(|network| network.as_str())
+                    .unwrap_or("tcp");
+                let networks = match network {
+                    "tcp" => vec![2],
+                    "tcp,udp" => vec![2, 3],
+                    other => bail!("the adi encoder cannot carry network {other:?}"),
+                };
+                let config = xray_proto::xray::proxy::shadowsocks_2022::ServerConfig {
+                    method: method.clone(),
+                    key: string(settings, "password"),
+                    email: string(settings, "email"),
+                    level: number(settings, "level") as i32,
+                    network: networks,
+                };
+                return Ok(typed_of(&config));
+            }
+            // A single inline account or one clients entry.
+            let client = clients(settings)
+                .first()
+                .cloned()
+                .unwrap_or_else(|| settings.clone());
+            let cipher = match string(&client, "method").as_str() {
+                "aes-128-gcm" => 5,
+                "aes-256-gcm" => 6,
+                "chacha20-ietf-poly1305" => 7,
+                other => bail!("the adi encoder cannot carry cipher {other:?}"),
+            };
+            let account = xray_proto::xray::proxy::shadowsocks::Account {
+                cipher_type: cipher,
+                password: string(&client, "password"),
+                ..Default::default()
+            };
+            let config = xray_proto::xray::proxy::shadowsocks::ServerConfig {
+                users: vec![User {
+                    email: string(&client, "email"),
+                    level: number(&client, "level") as u32,
+                    account: Some(typed_of(&account)),
+                }],
+                network: vec![2],
+            };
+            Ok(typed_of(&config))
+        }
+        other => bail!("the adi encoder does not carry protocol {other:?}"),
+    }
+}
+
+/// The per-protocol account TypedMessage inside one user record.
+fn account_settings(
+    protocol: &str,
+    client: &Value,
+) -> Result<xray_proto::xray::common::serial::TypedMessage> {
+    let string = |key: &str| -> String {
+        client
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    match protocol {
+        "vless" => Ok(typed_of(&xray_proto::xray::proxy::vless::Account {
+            id: string("id"),
+            flow: string("flow"),
+            ..Default::default()
+        })),
+        "vmess" => {
+            let security = match string("security").to_ascii_lowercase().as_str() {
+                "" | "auto" => 2,
+                "aes-128-gcm" => 3,
+                "chacha20-poly1305" => 4,
+                other => bail!("the adi encoder cannot carry VMess security {other:?}"),
+            };
+            Ok(typed_of(&xray_proto::xray::proxy::vmess::Account {
+                id: string("id"),
+                security_settings: Some(xray_proto::xray::common::protocol::SecurityConfig {
+                    r#type: security,
+                }),
+                tests_enabled: String::new(),
+            }))
+        }
+        "trojan" => Ok(typed_of(&xray_proto::xray::proxy::trojan::Account {
+            password: string("password"),
+        })),
+        other => bail!("the adi encoder does not carry {other:?} accounts"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -893,6 +1548,7 @@ mod tests {
             "statsonline",
             "statsgetallonlineusers",
             "restartlogger",
+            "lsi",
         ] {
             let command = TestCli::try_parse_from(["api", name]).unwrap().command;
             let args = command.connection().unwrap();
@@ -900,6 +1556,15 @@ mod tests {
             assert_eq!(args.timeout, 3);
             assert!(!args.json);
         }
+        // adi/rmi take required file/tag arguments like the source commands.
+        let command = TestCli::try_parse_from(["api", "adi", "inbounds.json"])
+            .unwrap()
+            .command;
+        assert!(matches!(command, ApiCommand::AddInbounds(_)));
+        let command = TestCli::try_parse_from(["api", "rmi", "a-tag"])
+            .unwrap()
+            .command;
+        assert!(matches!(command, ApiCommand::RemoveInbounds(_)));
         let cli = TestCli::try_parse_from([
             "api",
             "stats",
@@ -962,7 +1627,7 @@ mod tests {
             "-all and -email are mutually exclusive"
         );
         for (name, expected) in [
-            ("adi", "HandlerService"),
+            ("ado", "HandlerService"),
             ("bi", "RoutingService"),
             ("observatory", "real observation provider"),
         ] {
@@ -1376,5 +2041,97 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("deadline exceeded"));
+    }
+
+    #[test]
+    fn adi_encoder_carries_the_supported_inbound_shapes() {
+        use xray_proto::xray::{
+            app::proxyman::ReceiverConfig,
+            proxy::socks::{AuthType, ServerConfig as SocksConfig},
+        };
+
+        let inbound = serde_json::json!({
+            "tag": "added", "listen": "127.0.0.1", "port": 1080, "protocol": "socks",
+            "settings": {"auth": "password", "accounts": [{"user": "u", "pass": "p"}], "udp": true}
+        });
+        let handler = inbound_to_handler(&inbound).unwrap();
+        assert_eq!(handler.tag, "added");
+        let receiver: ReceiverConfig = handler.receiver_settings.unwrap().unpack().unwrap();
+        let ports = receiver.port_list.unwrap().range;
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].from, 1080);
+        let listen = receiver.listen.unwrap();
+        assert!(matches!(
+            listen.address,
+            Some(xray_proto::xray::common::net::ip_or_domain::Address::Ip(bytes))
+                if bytes == [127, 0, 0, 1]
+        ));
+        assert_eq!(receiver.stream_settings.unwrap().protocol_name, "tcp");
+        let proxy: SocksConfig = handler.proxy_settings.unwrap().unpack().unwrap();
+        assert_eq!(proxy.auth_type, AuthType::Password as i32);
+        assert_eq!(proxy.accounts.get("u").map(String::as_str), Some("p"));
+        assert!(proxy.udp_enabled);
+
+        // VLESS accounts travel as typed users; trojan passwords likewise.
+        let vless = serde_json::json!({
+            "tag": "v", "port": 443, "protocol": "vless",
+            "settings": {"decryption": "none", "clients": [
+                {"id": "mux-user", "email": "e", "level": 0, "flow": ""}
+            ]},
+            "streamSettings": {"network": "tcp", "security": "tls", "tlsSettings": {}}
+        });
+        let handler = inbound_to_handler(&vless).unwrap();
+        let stream = handler
+            .receiver_settings
+            .unwrap()
+            .unpack::<ReceiverConfig>()
+            .unwrap()
+            .stream_settings
+            .unwrap();
+        assert_eq!(stream.security_type, "xray.transport.internet.tls.Config");
+        let config: xray_proto::xray::proxy::vless::inbound::Config =
+            handler.proxy_settings.unwrap().unpack().unwrap();
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.decryption, "none");
+        let account: xray_proto::xray::proxy::vless::Account =
+            config.users[0].account.clone().unwrap().unpack().unwrap();
+        assert_eq!(account.id, "mux-user");
+
+        // Shadowsocks 2022 travels whole.
+        let ss2022 = serde_json::json!({
+            "tag": "s", "port": 8388, "protocol": "shadowsocks",
+            "settings": {"method": "2022-blake3-aes-128-gcm", "password": "k==", "email": "e", "network": "tcp,udp"}
+        });
+        let handler = inbound_to_handler(&ss2022).unwrap();
+        let config: xray_proto::xray::proxy::shadowsocks_2022::ServerConfig =
+            handler.proxy_settings.unwrap().unpack().unwrap();
+        assert_eq!(config.method, "2022-blake3-aes-128-gcm");
+        assert_eq!(config.key, "k==");
+        assert_eq!(config.network, vec![2, 3]);
+    }
+
+    #[test]
+    fn adi_encoder_names_its_rejections() {
+        let reject =
+            |inbound: serde_json::Value| inbound_to_handler(&inbound).unwrap_err().to_string();
+        let base = serde_json::json!({"port": 1080, "protocol": "socks", "settings": {}});
+        let mut ws = base.clone();
+        ws["streamSettings"] = serde_json::json!({"network": "ws"});
+        assert!(reject(ws).contains("plain TCP transport"));
+        let mut domain = base.clone();
+        domain["listen"] = serde_json::json!("proxy.example.com");
+        assert!(reject(domain).contains("IP \"listen\""));
+        let mut range = base.clone();
+        range["port"] = serde_json::json!("3000-4000");
+        assert!(reject(range).contains("single numeric"));
+        let mut mux = base.clone();
+        mux["protocol"] = serde_json::json!("mux");
+        assert!(reject(mux).contains("does not carry protocol"));
+        let mut fingerprint = base.clone();
+        fingerprint["streamSettings"] = serde_json::json!({
+            "network": "tcp", "security": "tls",
+            "tlsSettings": {"fingerprint": "chrome"}
+        });
+        assert!(reject(fingerprint).contains("does not carry tlsSettings"));
     }
 }

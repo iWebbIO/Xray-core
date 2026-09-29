@@ -23,9 +23,11 @@ mod reverse_runtime;
 mod sniffing;
 mod ss2022_udp_runtime;
 mod trojan_udp_runtime;
+pub mod tun_inbound;
 pub mod udp;
 mod udp_integration;
 pub mod udp_routing;
+mod wireguard_inbound;
 mod wireguard_runtime;
 
 use crate::{
@@ -225,15 +227,13 @@ impl Server {
         let mut listeners: Vec<ListenerEntry> = Vec::new();
         // The QUIC listeners of the hysteria inbounds: served through the
         // dispatch seam, not the per-stream accept loop.
-        let mut hysteria_listeners: Vec<(
-            crate::transport::hysteria_endpoint::HysteriaEndpointListener,
-            Inbound,
-            String,
-            Option<std::sync::Arc<sniffing::SniffingRequest>>,
-        )> = Vec::new();
+        let mut hysteria_listeners: Vec<HysteriaListenerEntry> = Vec::new();
         // Startup inbound snapshots for the HandlerService registry, plus the
         // SS2022 UDP listeners that bind alongside their TCP listener.
         let mut seeds: Vec<(crate::config::InboundConfig, Inbound, InboundTransport)> = Vec::new();
+        // One cancellation token per inbound tag: the HandlerService
+        // RemoveInbound path cancels exactly this inbound's listeners.
+        let mut inbound_tokens = std::collections::HashMap::<String, CancellationToken>::new();
         let mut addresses = Vec::new();
         for (raw, inbound, transport) in compiled.inbounds {
             // Go's PortList: one listener per port of the inbound's range.
@@ -243,6 +243,8 @@ impl Server {
             )
             .with_context(|| format!("inbound {:?} sniffing", raw.tag))?;
             let sniff = sniff.map(Arc::new);
+            let inbound_cancel = cancel_token.child_token();
+            inbound_tokens.insert(raw.tag.clone(), inbound_cancel.clone());
             for port in raw.port.ports() {
                 // Hysteria owns a QUIC listener per port: no TCP socket is
                 // bound and the streams dispatch through the QUIC seam.
@@ -257,7 +259,7 @@ impl Server {
                     let listener = match listener {
                         Ok(listener) => listener,
                         Err(error) => {
-                            for (listener, _, _, _, _) in listeners {
+                            for (listener, _, _, _, _, _) in listeners {
                                 if let Err(close_error) = listener.close().await {
                                     tracing::warn!(%close_error, "inbound rollback close failed");
                                 }
@@ -273,6 +275,7 @@ impl Server {
                         inbound.clone(),
                         raw.tag.clone(),
                         sniff.clone(),
+                        inbound_cancel.clone(),
                     ));
                     continue;
                 }
@@ -290,7 +293,7 @@ impl Server {
                         // KCP owns a UDP receive task. Join every prior
                         // listener's close before returning so failed startup
                         // releases ports.
-                        for (listener, _, _, _, _) in listeners {
+                        for (listener, _, _, _, _, _) in listeners {
                             if let Err(close_error) = listener.close().await {
                                 tracing::warn!(%close_error, "inbound rollback close failed");
                             }
@@ -306,6 +309,7 @@ impl Server {
                     raw.tag.clone(),
                     transport.clone(),
                     sniff.clone(),
+                    inbound_cancel.clone(),
                 ));
             }
         }
@@ -322,7 +326,7 @@ impl Server {
                     let bound = match bound {
                         Ok(bound) => bound,
                         Err(error) => {
-                            for (listener, _, _, _, _) in listeners {
+                            for (listener, _, _, _, _, _) in listeners {
                                 if let Err(close_error) = listener.close().await {
                                     tracing::warn!(%close_error, "inbound rollback close failed");
                                 }
@@ -362,7 +366,7 @@ impl Server {
                             // Release the already-bound TCP listeners before the
                             // failed startup propagates, exactly like a TCP bind
                             // failure inside the loop above.
-                            for (listener, _, _, _, _) in listeners {
+                            for (listener, _, _, _, _, _) in listeners {
                                 if let Err(close_error) = listener.close().await {
                                     tracing::warn!(%close_error, "inbound rollback close failed");
                                 }
@@ -440,6 +444,9 @@ impl Server {
         registry.attach_router(Arc::clone(&dispatcher.router));
         for (raw, inbound, transport) in seeds {
             registry.seed_inbound(raw, inbound, transport);
+        }
+        for (tag, token) in inbound_tokens {
+            registry.attach_inbound_cancel(tag, token);
         }
         registry.seed_outbounds(config.outbounds.clone());
         let reflection_service = config
@@ -589,7 +596,7 @@ impl Server {
                     });
                 }
             }
-            for (listener, inbound, tag, transport, sniff) in listeners {
+            for (listener, inbound, tag, transport, sniff, inbound_stop) in listeners {
                 tasks.spawn(accept_loop(
                     listener,
                     inbound,
@@ -597,15 +604,15 @@ impl Server {
                     transport,
                     sniff,
                     dispatcher.clone(),
-                    stopping.clone(),
+                    inbound_stop,
                 ));
             }
-            for (listener, inbound, tag, sniff) in hysteria_listeners {
+            for (listener, inbound, tag, sniff, inbound_stop) in hysteria_listeners {
                 let dispatcher = dispatcher.clone();
-                let stop = stopping.clone();
                 let tag: Arc<str> = Arc::from(tag);
                 tasks.spawn(async move {
-                    hysteria_seam::serve(listener, inbound, tag, sniff, dispatcher, stop).await
+                    hysteria_seam::serve(listener, inbound, tag, sniff, dispatcher, inbound_stop)
+                        .await
                 });
             }
             if tasks.is_empty() {
@@ -817,12 +824,23 @@ enum UdpEntry {
 
 /// One bound inbound: its listener, compiled protocol/transport, tag and
 /// compiled sniffing request.
+/// One bound hysteria QUIC listener: the endpoint, the compiled inbound,
+/// its tag, sniffing request and per-tag cancellation token.
+type HysteriaListenerEntry = (
+    crate::transport::hysteria_endpoint::HysteriaEndpointListener,
+    Inbound,
+    String,
+    Option<std::sync::Arc<sniffing::SniffingRequest>>,
+    CancellationToken,
+);
+
 type ListenerEntry = (
     InboundListener,
     Inbound,
     String,
     InboundTransport,
     Option<std::sync::Arc<sniffing::SniffingRequest>>,
+    CancellationToken,
 );
 
 #[allow(clippy::too_many_arguments)]
