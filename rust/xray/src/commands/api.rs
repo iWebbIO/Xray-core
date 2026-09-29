@@ -68,6 +68,12 @@ pub enum ApiCommand {
     /// List the running inbounds.
     #[command(name = "lsi")]
     ListInbounds(ListInboundsArgs),
+    /// Retrieve inbound user(s) by tag, optionally by email.
+    #[command(name = "inbounduser")]
+    InboundUser(InboundUserArgs),
+    /// Retrieve the user count of an inbound.
+    #[command(name = "inboundusercount")]
+    InboundUserCount(InboundUserCountArgs),
     /// Preserve an explicit unsupported-service diagnostic for other commands.
     #[command(external_subcommand)]
     Unsupported(Vec<String>),
@@ -98,6 +104,27 @@ pub struct ListInboundsArgs {
     /// Print only the inbound tags.
     #[arg(long, default_value_t = false)]
     pub is_only_tags: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct InboundUserArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// The inbound tag.
+    #[arg(long, default_value = "")]
+    pub tag: String,
+    /// The user's email; empty retrieves every user of the inbound.
+    #[arg(long, default_value = "")]
+    pub email: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct InboundUserCountArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+    /// The inbound tag.
+    #[arg(long, default_value = "")]
+    pub tag: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -201,12 +228,12 @@ impl ApiCommand {
             Self::ListInbounds(args) => &args.connection,
             Self::AddInbounds(args) => &args.connection,
             Self::RemoveInbounds(args) => &args.connection,
+            Self::InboundUser(args) => &args.connection,
+            Self::InboundUserCount(args) => &args.connection,
             Self::Unsupported(args) => {
                 let name = args.first().map(String::as_str).unwrap_or("");
                 let service = match name {
-                    "ado" | "rmo" | "lso" | "adu" | "rmu" | "inbounduser" | "inboundusercount" => {
-                        "HandlerService"
-                    }
+                    "ado" | "rmo" | "lso" | "adu" | "rmu" => "HandlerService",
                     "bi" | "bo" | "sib" => "RoutingService",
                     "observatory" | "outboundstatus" => {
                         "ObservatoryService with a real observation provider"
@@ -780,6 +807,76 @@ async fn execute_at(command: ApiCommand, deadline: Instant) -> Result<String> {
             object({
                 let mut fields = Object::new();
                 fields.insert("inbounds".into(), Value::Array(inbounds));
+                fields
+            })
+        }
+        ApiCommand::InboundUser(args) => {
+            use xray_proto::xray::app::proxyman::command::{
+                GetInboundUserRequest, handler_service_client::HandlerServiceClient,
+            };
+            let mut client = HandlerServiceClient::new(channel);
+            let response = rpc(
+                deadline,
+                "failed to get inbound user",
+                client.get_inbound_users(request(
+                    GetInboundUserRequest {
+                        tag: args.tag,
+                        email: args.email,
+                    },
+                    deadline,
+                )?),
+            )
+            .await?;
+            // The response prints like Go's showJSONResponse: the user list.
+            let users = response
+                .into_inner()
+                .users
+                .into_iter()
+                .map(|user| {
+                    object({
+                        let mut fields = Object::new();
+                        text(&mut fields, "email", user.email);
+                        number(&mut fields, "level", i64::from(user.level));
+                        if let Some(account) = user.account {
+                            fields.insert(
+                                "account".into(),
+                                object({
+                                    let mut account_fields = Object::new();
+                                    text(&mut account_fields, "type", account.r#type);
+                                    account_fields
+                                }),
+                            );
+                        }
+                        fields
+                    })
+                })
+                .collect::<Vec<_>>();
+            object({
+                let mut fields = Object::new();
+                fields.insert("users".into(), Value::Array(users));
+                fields
+            })
+        }
+        ApiCommand::InboundUserCount(args) => {
+            use xray_proto::xray::app::proxyman::command::{
+                GetInboundUserRequest, handler_service_client::HandlerServiceClient,
+            };
+            let mut client = HandlerServiceClient::new(channel);
+            let response = rpc(
+                deadline,
+                "failed to get inbound user count",
+                client.get_inbound_users_count(request(
+                    GetInboundUserRequest {
+                        tag: args.tag,
+                        email: String::new(),
+                    },
+                    deadline,
+                )?),
+            )
+            .await?;
+            object({
+                let mut fields = Object::new();
+                number(&mut fields, "count", response.into_inner().count);
                 fields
             })
         }
@@ -1549,6 +1646,8 @@ mod tests {
             "statsgetallonlineusers",
             "restartlogger",
             "lsi",
+            "inbounduser",
+            "inboundusercount",
         ] {
             let command = TestCli::try_parse_from(["api", name]).unwrap().command;
             let args = command.connection().unwrap();
