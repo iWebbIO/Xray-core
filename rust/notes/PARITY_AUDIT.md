@@ -523,3 +523,32 @@ UDP, MASQUE HTTP/3, legacy SS UDP, dokodemo UDP, port ranges, user levels.
   ado/rmo/lso (the runtime's outbound set is immutable after startup),
   adu/rmu (alter_inbound needs mutable per-listener account sets).
 - Gates: fmt; clippy -D warnings clean; workspace tests **1256/0/5**.
+
+## September 29, 2026 — convert pb: the config-to-protobuf encoder
+
+`xray convert pb` is live: the CLI loader merges the JSON inputs (Go's
+core.LoadConfig), Build-time validation runs, `config::protobuf_encode`
+(the exact inverse of the config/protobuf decoder — every decoded arm has
+an encoder, every decoder fail-closed shape has a named JSON-side
+rejection) marshals the `xray.core.Config` message to the `.pb` file, and
+`-d` dumps the marshaled bytes as reflection JSON via prost-reflect. The
+round trip is proven end to end: the emitted `.pb` reloads through the
+`run --format pb` loader and re-validates. Ten round-trip tests cover the
+socks/http/dokodemo/vless (incl. mlkem encryption + REALITY)/vmess/
+trojan/shadowsocks (legacy + 2022 single-key) protocol pairs, the
+grpc/mkcp/httpupgrade/xhttp/plain-tcp transports, and the log/policy/
+stats/api/routing/observatory apps.
+
+Documented encoder rejections mirror the decoder's envelope exactly (the
+full list rides in the module): root apps without proto arms (dns,
+reverse, burstObservatory, fakeDns, metrics, version, geodata), balancer
+rules, the not-yet-migrated DNS routing strategies, the inbound/outbound
+protocols and transports the decoder does not carry (hysteria/tun/
+wireguard/dns/loopback/masque), port ranges, unix listen paths, VLESS
+fallbacks, SS multi-user shapes, REALITY server keys, tcpSettings (the
+proto TCP header form vs the native runtime's), and the strict tlsSettings
+mirror's unknown fields.
+
+Final gate state for the whole batch: fmt; clippy -D warnings clean;
+workspace tests **1268/0/5**; Go interop **34/34 + 6/6 + 8/8**; all five
+env-gated Go fixtures green.
