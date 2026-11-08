@@ -3,9 +3,15 @@ name: Build Core
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to release (e.g. v26.10.31-allowinsecure). Leave empty to build only."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -67,3 +73,51 @@ jobs:
           name: xray-${{ matrix.goos }}-${{ matrix.goarch }}
           path: build_assets/
           if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          cd release_assets
+          sha256sum xray-* > SHA256SUMS
+          ls -lh
+          cd ..
+          cat > RELEASE_NOTES.md <<EOF
+          Fork build of Xray-core from [$GITHUB_REPOSITORY](https://github.com/$GITHUB_REPOSITORY) at commit $GITHUB_SHA.
+
+          This build restores the removed allowInsecure TLS option.
+
+          Built by GitHub Actions run [$GITHUB_RUN_ID](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+
+          Assets:
+          - xray-linux-amd64
+          - xray-linux-arm64
+          - xray-darwin-arm64
+          - xray-windows-amd64.exe
+          - SHA256SUMS
+          EOF
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release_assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            TARGET=()
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              TARGET=(--target "$GITHUB_SHA")
+            fi
+            gh release create "$TAG" "${TARGET[@]}" --repo "$GITHUB_REPOSITORY" \
+              --title "Xray Core $TAG" --notes-file RELEASE_NOTES.md release_assets/*
+          fi
