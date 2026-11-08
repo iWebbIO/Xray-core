@@ -1,0 +1,69 @@
+name: Build Core
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Get project dependencies
+        run: go mod download
+
+      - name: Build core
+        shell: bash
+        run: |
+          mkdir -p build_assets
+          COMMID=$(git describe --always --dirty)
+          OUTPUT="build_assets/xray-${GOOS}-${GOARCH}"
+          if [[ "${GOOS}" == "windows" ]]; then
+            OUTPUT="${OUTPUT}.exe"
+          fi
+          go build -o "${OUTPUT}" -trimpath -buildvcs=false -gcflags="all=-l=4" \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" \
+            -v ./main
+          echo "- \`${OUTPUT}\` (${GOOS}/${GOARCH}, commit ${COMMID})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload core binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build_assets/
+          if-no-files-found: error
