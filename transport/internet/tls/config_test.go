@@ -97,3 +97,12 @@ func BenchmarkCertificateIssuing(b *testing.B) {
 		tlsConfig.Certificates = tlsConfig.Certificates[:lenCerts]
 	}
 }
+
+func TestAllowInsecure(t *testing.T) {
+	c := &Config{AllowInsecure: true}
+
+	tlsConfig := c.GetTLSConfig()
+	if !tlsConfig.InsecureSkipVerify {
+		t.Fatal("InsecureSkipVerify should be true when AllowInsecure is enabled")
+	}
+}
